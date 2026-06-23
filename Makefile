@@ -35,6 +35,13 @@ WASM_PROJECTS := $(patsubst %/Makefile,%,$(shell \
     grep -rlE '^(wasm:|[[:space:]]*include .*/(wasm|legacy)\.mk)' \
     platform/*/*/Makefile 2>/dev/null))
 
+# Projects that support the headless offline render harness (`make render`):
+# those whose wasm.cc uses a shared bridge with a WEBSIM_RENDER path. Excludes
+# the inline nts-1_mkii / nts-3 bridges (no render main yet).
+RENDER_PROJECTS := $(patsubst %/wasm.cc,%,$(shell \
+    grep -rlE 'mk2_osc_bridge\.h|mk2_fx_bridge\.h|dl_synth_bridge\.h|dl_fx_bridge\.h|legacy_osc_bridge\.h|legacy_fx_bridge\.h' \
+    platform/*/*/wasm.cc 2>/dev/null))
+
 # Resolve $(PROJECT) to a project directory at recipe time:
 #   - a real path containing a Makefile is used as-is
 #   - otherwise it's matched as a bare name against the discovered wasm projects
@@ -63,7 +70,7 @@ endef
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup check list websim websim-all run clean
+.PHONY: help setup check list websim websim-all run clean render render-all build-all
 
 # Projects to bundle into the co-serve tree. Defaults to every wasm-capable
 # project; override with a space-separated list of full paths, e.g.
@@ -80,6 +87,9 @@ help:
 	@echo "  websim           Build a single project to WebAssembly and open it in the browser."
 	@echo "  websim-all       Build every (or PROJECTS=...) project into one tree and serve them"
 	@echo "                   together, with in-page Device/Project comboboxes to switch units."
+	@echo "  render           Headlessly render one PROJECT to a WAV (no browser); see WEBSIM.md B."
+	@echo "  render-all       Render every render-capable project and assert finite output (CI smoke)."
+	@echo "  build-all        Compile every wasm-capable project (build only); fail on any error (CI)."
 	@echo "  clean            Remove a project's build/ and sim/ output."
 	@echo "  help             Show this message."
 	@echo ""
@@ -164,6 +174,46 @@ websim-all: check
 	@echo "==> Opening the websim launcher"
 	@$(EMCC_BIN_PATH)/emrun --browser chrome --serve_after_close \
 	  --serve_root $(WEBSIM_SIM_ROOT) $(WEBSIM_SIM_ROOT)/index.html
+
+# Headless offline render: build a single project in render mode and dump a WAV
+# (no browser). See WEBSIM.md §B. Forward args via WEBSIM_RENDER_ARGS.
+#   make render PROJECT=platform/microkorg2/vox WEBSIM_RENDER_ARGS="out.wav 69"
+render: check
+	@$(resolve_project); \
+	echo "==> Rendering $$dir"; \
+	$(MAKE) -C "$$dir" render WEBSIM_RENDER_ARGS="$(WEBSIM_RENDER_ARGS)"
+
+# CI smoke: render every render-capable project headlessly and assert the output
+# is finite (no NaN/Inf). Silent templates pass; this catches crashes and
+# numerical blow-ups without a browser. See WEBSIM.md §B and the CI notes (§E).
+render-all: check
+	@fail=""; for p in $(RENDER_PROJECTS); do \
+	  plat=$$(basename $$(dirname $$p)); proj=$$(basename $$p); \
+	  echo "==> render $$plat/$$proj"; \
+	  if ! $(MAKE) --no-print-directory -C "$$p" render >/dev/null 2>&1; then \
+	    echo "!!  $$plat/$$proj: render failed"; fail="$$fail $$plat/$$proj"; continue; \
+	  fi; \
+	  wav=$$(ls "$$p"/sim/*.render.wav 2>/dev/null | head -1); \
+	  if [ -z "$$wav" ] || ! python3 websim/scripts/check_render.py "$$wav" >/dev/null 2>&1; then \
+	    echo "!!  $$plat/$$proj: check failed"; fail="$$fail $$plat/$$proj"; \
+	  else echo "    ok ($$wav)"; fi; \
+	done; \
+	if [ -n "$$fail" ]; then printf '\nrender-all FAILED:%s\n' "$$fail"; exit 1; fi; \
+	echo "render-all: all renders finite and OK"
+
+# CI build smoke: compile every wasm-capable project (build only, no browser) and
+# fail on the first compile/link error. Unlike `websim-all` this does not skip
+# failures or launch emrun — it's the gate a CI job runs. See WEBSIM.md (§E).
+build-all: check
+	@fail=""; for p in $(WASM_PROJECTS); do \
+	  plat=$$(basename $$(dirname $$p)); proj=$$(basename $$p); \
+	  echo "==> build $$plat/$$proj"; \
+	  if ! $(MAKE) --no-print-directory -C "$$p" wasm-build >/dev/null 2>&1; then \
+	    echo "!!  $$plat/$$proj: build FAILED"; fail="$$fail $$plat/$$proj"; \
+	  fi; \
+	done; \
+	if [ -n "$$fail" ]; then printf '\nbuild-all FAILED:%s\n' "$$fail"; exit 1; fi; \
+	echo "build-all: $(words $(WASM_PROJECTS)) project(s) built OK"
 
 clean:
 	@$(resolve_project); \

@@ -20,13 +20,18 @@
 #endif
 
 #include <emscripten/bind.h>
-#include <emscripten/webaudio.h>
 #include <emscripten/em_math.h>
+#ifndef WEBSIM_RENDER
+#include <emscripten/webaudio.h>
+#endif
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include "../wav_writer.h"
+#include "dl_sample_bank.h"
 using namespace emscripten;
 
 uint8_t audioThreadStack[4096];
@@ -162,6 +167,29 @@ void noteOff(uint8_t note)
   processor.GateOff();
 }
 
+// Shared one-time processor setup, used by both the AudioWorklet path and the
+// offline render harness (WEBSIM_RENDER).
+static void websim_setup_processor()
+{
+  s_desc = {};
+  s_desc.target = unit_header.target;
+  s_desc.api = unit_header.api;
+  s_desc.samplerate = SAMPLE_RATE;
+  s_desc.frames_per_buffer = WEB_AUDIO_FRAME_SIZE;
+  s_desc.input_channels = 0;
+  s_desc.output_channels = 2;
+  // Sample-bank accessors backed by a synthetic host bank so sample-playback
+  // synths (e.g. SmplVox) initialise and make sound; synths that ignore them are
+  // unaffected. See websim/dsp/drumlogue/dl_sample_bank.h.
+  s_desc.get_num_sample_banks = &websim::websim_get_num_sample_banks;
+  s_desc.get_num_samples_for_bank = &websim::websim_get_num_samples_for_bank;
+  s_desc.get_sample = &websim::websim_get_sample;
+
+  processor.Init(&s_desc);
+  processor.Reset();
+}
+
+#ifndef WEBSIM_RENDER
 EMSCRIPTEN_BINDINGS(my_module)
 {
   value_object<AudioWorkletParameter>("AudioWorkletParameter")
@@ -211,21 +239,7 @@ void AudioWorkletProcessorCreated(EMSCRIPTEN_WEBAUDIO_T audioContext, bool succe
   if (!success)
     return;
 
-  s_desc = {};
-  s_desc.target = unit_header.target;
-  s_desc.api = unit_header.api;
-  s_desc.samplerate = SAMPLE_RATE;
-  s_desc.frames_per_buffer = WEB_AUDIO_FRAME_SIZE;
-  s_desc.input_channels = 0;
-  s_desc.output_channels = 2;
-  // drumlogue exposes sample-bank accessors (used by sample-playback synths);
-  // dummy-synth doesn't touch them, so leave them null.
-  s_desc.get_num_sample_banks = nullptr;
-  s_desc.get_num_samples_for_bank = nullptr;
-  s_desc.get_sample = nullptr;
-
-  processor.Init(&s_desc);
-  processor.Reset();
+  websim_setup_processor();
 
   int outputChannelCounts[1] = {2};
   EmscriptenAudioWorkletNodeCreateOptions options = {
@@ -279,3 +293,40 @@ int main()
 
   emscripten_exit_with_live_runtime();
 }
+
+#else  // WEBSIM_RENDER
+
+// Offline render harness: trigger a note and render N blocks of stereo audio to
+// a float WAV. Built without AudioWorklet and run under node (see `make render`).
+//   argv: [out.wav] [midiNote=60] [blocks=375 (~1s @48k/128)]
+int main(int argc, char **argv)
+{
+  const char *out = (argc > 1) ? argv[1] : "render.wav";
+  const int note = (argc > 2) ? std::atoi(argv[2]) : 60;
+  const int blocks = (argc > 3) ? std::atoi(argv[3]) : 375;
+
+  websim_setup_processor();
+  for (int i = 0; i < unit_header.num_params; ++i)
+    processor.setParameter(i, unit_header.params[i].init);
+  processor.NoteOn((uint8_t)note, 127);
+  processor.GateOn(127);
+
+  std::vector<float> samples;
+  samples.reserve((size_t)blocks * WEB_AUDIO_FRAME_SIZE * 2);
+  for (int b = 0; b < blocks; ++b)
+  {
+    processor.Render(interleavedOut.data(), WEB_AUDIO_FRAME_SIZE);
+    for (int i = 0; i < WEB_AUDIO_FRAME_SIZE * 2; ++i)
+      samples.push_back(interleavedOut[i]);
+  }
+
+  if (!websim::write_wav_f32(out, samples, 2, SAMPLE_RATE))
+  {
+    std::fprintf(stderr, "render: failed to write %s\n", out);
+    return 1;
+  }
+  std::fprintf(stderr, "render: wrote %s (%zu frames)\n", out, samples.size() / 2);
+  return 0;
+}
+
+#endif  // WEBSIM_RENDER

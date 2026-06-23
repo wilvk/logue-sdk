@@ -1,5 +1,5 @@
 # #############################################################################
-# minilogue xd Oscillator Makefile
+# prologue Modulation FX Makefile
 # #############################################################################
 
 PLATFORMDIR ?= $(abspath ..)
@@ -31,7 +31,7 @@ include ./project.mk
 
 MCU := cortex-m4
 
-MCU_MODEL := STM32F401xC
+MCU_MODEL := STM32F446xE
 
 GCC_TARGET := arm-none-eabi-
 GCC_BIN_PATH ?= $(TOOLSDIR)/gcc/gcc-arm-none-eabi-5_4-2016q3/bin
@@ -50,7 +50,7 @@ HEX  := $(CP) -O ihex
 BIN  := $(CP) -O binary
 
 RULESPATH := $(LDDIR)
-LDSCRIPT := $(LDDIR)/userosc.ld
+LDSCRIPT := $(LDDIR)/usermodfx.ld
 DLIBS := -lm
 
 DADEFS := -D$(MCU_MODEL) -DCORTEX_USE_FPU=TRUE -DARM_MATH_CM4
@@ -59,7 +59,7 @@ DDEFS := -D$(MCU_MODEL) -DCORTEX_USE_FPU=TRUE -DARM_MATH_CM4 -D__FPU_PRESENT
 COPT := -std=c11 -mstructure-size-boundary=8
 CXXOPT := -std=c++11 -fno-rtti -fno-exceptions -fno-non-call-exceptions
 
-LDOPT := -Xlinker --just-symbols=$(LDDIR)/osc_api.syms
+LDOPT := -Xlinker --just-symbols=$(LDDIR)/main_api.syms
 
 CWARN := -W -Wall -Wextra
 CXXWARN :=
@@ -77,7 +77,7 @@ TOPT := -mthumb -mno-thumb-interwork -DTHUMB_NO_INTERWORKING -DTHUMB_PRESENT
 # set targets and directories
 # #############################################################################
 
-PKGARCH := $(PROJECT).mnlgxdunit
+PKGARCH := $(PROJECT).ntkdigunit
 MANIFEST := manifest.json
 PAYLOAD := payload.bin
 
@@ -226,19 +226,13 @@ install: $(BUILDDIR)/$(PKGARCH)
 	@echo
 
 ##############################################################################
-# WebAssembly (websim) build — gen-1 legacy harness, see WEBSIM.md
+# WebAssembly (websim) build — gen-1 legacy fx harness, see WEBSIM.md
 #
 PROJECT_ROOT    ?= $(PROJECTDIR)/
 SANDBOXDIR      ?= $(realpath $(PLATFORMDIR)/../../websim)
-WEBSIM_SHELL    := osc.html
+WEBSIM_SHELL    := fx.html
 WEBSIM_INCFLAGS := -I. -I$(PLATFORMDIR)/inc -I$(PLATFORMDIR)/inc/utils -I$(PLATFORMDIR)/inc/dsp -I$(SANDBOXDIR)/dsp/legacy
 WEBSIM_UNITSRC  := wasm.cc $(UCXXSRC) $(UCSRC)
-# Shared ROM data/LUTs minus the gen-2 osc_api.cpp/fx_api.cpp (gen-1 defines the
-# osc API inline and needs the underscore-prefixed ROM symbols instead), plus the
-# gen-1 ROM stand-ins (legacy_osc_api.cpp).
-WEBSIM_DSP      := $(filter-out %/osc_api.cpp %/fx_api.cpp, \
-                     $(wildcard $(SANDBOXDIR)/dsp/*.c) $(wildcard $(SANDBOXDIR)/dsp/*.cpp)) \
-                   $(wildcard $(SANDBOXDIR)/dsp/legacy/*.cpp)
-# Generate the slider param table from manifest.json (websim_legacy_params.h).
-WEBSIM_LEGACY_MANIFEST := $(PROJECTDIR)/manifest.json
+# A gen-1 modfx needs no firmware ROM stand-ins (just libm); keep the build lean.
+WEBSIM_DSP      :=
 include $(SANDBOXDIR)/legacy.mk

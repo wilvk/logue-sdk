@@ -18,12 +18,17 @@
 #endif
 
 #include <emscripten/bind.h>
-#include <emscripten/webaudio.h>
 #include <emscripten/em_math.h>
+#ifndef WEBSIM_RENDER
+#include <emscripten/webaudio.h>
+#endif
 #include <array>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
+#include "../wav_writer.h"
 using namespace emscripten;
 
 // this needs to be big enough for the output, params and the worker stack
@@ -178,6 +183,35 @@ void noteOn(uint8_t note, uint8_t velocity)
 
 void noteOff(uint8_t note) { (void)note; }
 
+// Shared one-time processor + runtime-context setup, used by both the
+// AudioWorklet path and the offline render harness (WEBSIM_RENDER).
+static void websim_setup_processor()
+{
+  // Single-voice osc context.
+  s_osc_ctx = {};
+  s_osc_ctx.pitch[0] = 60.f; // default middle C until a key is pressed
+  s_osc_ctx.voiceLimit = 1;
+  s_osc_ctx.voiceOffset = 0;
+  s_osc_ctx.outputStride = 1;
+  s_osc_ctx.bufferOffset = 0;
+  s_osc_ctx.modDataSize = kMk2MaxVoices;
+  s_osc_ctx.unitModDataPlus = s_mod_plus;
+  s_osc_ctx.unitModDataPlusMinus = s_mod_plus_minus;
+
+  s_desc = {};
+  s_desc.target = unit_header.target;
+  s_desc.api = UNIT_API_VERSION;
+  s_desc.samplerate = SAMPLE_RATE;
+  s_desc.frames_per_buffer = WEB_AUDIO_FRAME_SIZE;
+  s_desc.input_channels = 0;
+  s_desc.output_channels = 1;
+  s_desc.hooks.runtime_context = &s_osc_ctx;
+
+  processor.Init(&s_desc);
+  processor.Reset();
+}
+
+#ifndef WEBSIM_RENDER
 EMSCRIPTEN_BINDINGS(my_module)
 {
   value_object<AudioWorkletParameter>("AudioWorkletParameter")
@@ -232,28 +266,7 @@ void AudioWorkletProcessorCreated(EMSCRIPTEN_WEBAUDIO_T audioContext, bool succe
   if (!success)
     return;
 
-  // Single-voice osc context.
-  s_osc_ctx = {};
-  s_osc_ctx.pitch[0] = 60.f; // default middle C until a key is pressed
-  s_osc_ctx.voiceLimit = 1;
-  s_osc_ctx.voiceOffset = 0;
-  s_osc_ctx.outputStride = 1;
-  s_osc_ctx.bufferOffset = 0;
-  s_osc_ctx.modDataSize = kMk2MaxVoices;
-  s_osc_ctx.unitModDataPlus = s_mod_plus;
-  s_osc_ctx.unitModDataPlusMinus = s_mod_plus_minus;
-
-  s_desc = {};
-  s_desc.target = unit_header.target;
-  s_desc.api = UNIT_API_VERSION;
-  s_desc.samplerate = SAMPLE_RATE;
-  s_desc.frames_per_buffer = WEB_AUDIO_FRAME_SIZE;
-  s_desc.input_channels = 0;
-  s_desc.output_channels = 1;
-  s_desc.hooks.runtime_context = &s_osc_ctx;
-
-  processor.Init(&s_desc);
-  processor.Reset();
+  websim_setup_processor();
 
   int outputChannelCounts[1] = {1};
   EmscriptenAudioWorkletNodeCreateOptions options = {
@@ -307,3 +320,47 @@ int main()
 
   emscripten_exit_with_live_runtime();
 }
+
+#else  // WEBSIM_RENDER
+
+// Offline render harness: render N blocks of the oscillator at a fixed MIDI note
+// and write a mono float WAV. Built without AudioWorklet and run under node
+// (see `make render`); reuses the exact same DSP + SIMD shim as the browser
+// build, so it validates audio correctness headlessly. See WEBSIM.md §B.
+//   argv: [out.wav] [midiNote=60] [blocks=375 (~1s @48k/128)]
+int main(int argc, char **argv)
+{
+  const char *out = (argc > 1) ? argv[1] : "render.wav";
+  const float note = (argc > 2) ? (float)std::atof(argv[2]) : 60.f;
+  const int blocks = (argc > 3) ? std::atoi(argv[3]) : 375;
+
+  websim_setup_processor();
+  s_osc_ctx.pitch[0] = note;
+
+  // Drive params to their init values (k-rate, as the worklet would).
+  for (int i = 0; i < unit_header.num_params; ++i)
+    processor.setParameter(i, unit_header.params[i].init);
+
+  std::vector<float> samples;
+  samples.reserve((size_t)blocks * WEB_AUDIO_FRAME_SIZE);
+  for (int b = 0; b < blocks; ++b)
+  {
+#ifdef MK2_OSC_PROCESS_HAS_IN
+    processor.Process(nullptr, interleavedOut.data(), WEB_AUDIO_FRAME_SIZE);
+#else
+    processor.Process(interleavedOut.data(), WEB_AUDIO_FRAME_SIZE);
+#endif
+    for (int i = 0; i < WEB_AUDIO_FRAME_SIZE; ++i)
+      samples.push_back(interleavedOut[i]);
+  }
+
+  if (!websim::write_wav_f32(out, samples, 1, SAMPLE_RATE))
+  {
+    std::fprintf(stderr, "render: failed to write %s\n", out);
+    return 1;
+  }
+  std::fprintf(stderr, "render: wrote %s (%zu samples, note %.1f)\n", out, samples.size(), note);
+  return 0;
+}
+
+#endif  // WEBSIM_RENDER

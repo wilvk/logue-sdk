@@ -23,12 +23,17 @@
 #endif
 
 #include <emscripten/bind.h>
-#include <emscripten/webaudio.h>
 #include <emscripten/em_math.h>
+#ifndef WEBSIM_RENDER
+#include <emscripten/webaudio.h>
+#endif
 #include <array>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
+#include "../wav_writer.h"
 using namespace emscripten;
 
 // gen-1 oscillator entry points. The OSC_INIT/OSC_CYCLE/... macros in userosc.h
@@ -135,6 +140,11 @@ void noteOff(uint8_t note)
   _hook_off(&p);
 }
 
+// Shared one-time init, used by both the AudioWorklet path and the offline
+// render harness (WEBSIM_RENDER).
+static void websim_setup_processor() { _hook_init(0, 0); }
+
+#ifndef WEBSIM_RENDER
 EMSCRIPTEN_BINDINGS(my_module)
 {
   value_object<AudioWorkletParameter>("AudioWorkletParameter")
@@ -189,7 +199,7 @@ void AudioWorkletProcessorCreated(EMSCRIPTEN_WEBAUDIO_T audioContext, bool succe
   if (!success)
     return;
 
-  _hook_init(0, 0);
+  websim_setup_processor();
 
   int outputChannelCounts[1] = {1};
   EmscriptenAudioWorkletNodeCreateOptions options = {
@@ -243,3 +253,48 @@ int main()
 
   emscripten_exit_with_live_runtime();
 }
+
+#else  // WEBSIM_RENDER
+
+// Offline render harness: render N blocks of the gen-1 oscillator at a fixed
+// note and write a mono float WAV. Built without AudioWorklet and run under node
+// (see `make render`).
+//   argv: [out.wav] [midiNote=69] [blocks=375 (~1s @48k/128)]
+int main(int argc, char **argv)
+{
+  const char *out = (argc > 1) ? argv[1] : "render.wav";
+  const int note = (argc > 2) ? std::atoi(argv[2]) : 69;
+  const int blocks = (argc > 3) ? std::atoi(argv[3]) : 375;
+
+  websim_setup_processor();
+  s_pitch = (uint16_t)(note << 8);
+
+  // Drive params to their init values (slider order == OSC_PARAM index order).
+  auto params = buildParameters();
+  for (int i = 0; i < (int)params.size(); ++i)
+    _hook_param((uint16_t)i, (uint16_t)params[i].init);
+
+  user_osc_param_t p = {};
+  p.pitch = s_pitch;
+  _hook_on(&p);
+
+  std::vector<float> samples;
+  samples.reserve((size_t)blocks * WEB_AUDIO_FRAME_SIZE);
+  for (int b = 0; b < blocks; ++b)
+  {
+    p.pitch = s_pitch;
+    _hook_cycle(&p, q31Out.data(), WEB_AUDIO_FRAME_SIZE);
+    for (int i = 0; i < WEB_AUDIO_FRAME_SIZE; ++i)
+      samples.push_back(q31Out[i] * Q31_TO_F32);
+  }
+
+  if (!websim::write_wav_f32(out, samples, 1, SAMPLE_RATE))
+  {
+    std::fprintf(stderr, "render: failed to write %s\n", out);
+    return 1;
+  }
+  std::fprintf(stderr, "render: wrote %s (%zu samples, note %d)\n", out, samples.size(), note);
+  return 0;
+}
+
+#endif  // WEBSIM_RENDER

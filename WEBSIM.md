@@ -179,8 +179,14 @@ unit.cc (your DSP, Processor subclass)
 ## Prerequisites (all platforms)
 
 - **git** (to fetch the `emsdk` submodule).
-- **Python 3** (used by emsdk and `emrun`).
+- **Python 3** (used by emsdk, `emrun`, and the param/render helper scripts — stdlib only, no
+  numpy/scipy).
 - **GNU make**.
+- **Emscripten** — pin a recent version (CI uses **4.0.16**). Minimum **3.1.x+**: the drumlogue
+  units need SIMDe's `<arm_neon.h>` (built with `-msimd128`), and recent emsdk **rejects**
+  `-I.../emscripten/system/include` (emcc resolves its own system headers via the sysroot, so the
+  build must not add it). `make setup` installs `latest`; pin a version for reproducibility
+  (`cd tools/emsdk && ./emsdk install 4.0.16 && ./emsdk activate 4.0.16`).
 - **Google Chrome** — the `wasm` target hardcodes `emrun --browser chrome`. Install Chrome,
   or edit the target to use another browser (see [Troubleshooting](#troubleshooting)).
 - The ARM GCC toolchain is **not** required for `make wasm` (only `emcc` is used).
@@ -258,15 +264,22 @@ Projects you can try:
 | [platform/nts-3_kaoss/pluck](platform/nts-3_kaoss/pluck) | generic FX | xypad |
 | [platform/nts-3_kaoss/dummy-genericfx](platform/nts-3_kaoss/dummy-genericfx) | generic FX template | xypad |
 | [platform/microkorg2/waves](platform/microkorg2/waves) | oscillator (gen-2) | osc |
+| [platform/microkorg2/vox](platform/microkorg2/vox) | oscillator (formant, NEON) | osc |
 | [platform/microkorg2/dummy-osc](platform/microkorg2/dummy-osc) | oscillator template | osc |
 | [platform/microkorg2/dummy-modfx](platform/microkorg2/dummy-modfx) | effect template | fx |
 | [platform/microkorg2/dummy-delfx](platform/microkorg2/dummy-delfx) | effect template | fx |
 | [platform/microkorg2/dummy-revfx](platform/microkorg2/dummy-revfx) | effect template | fx |
+| [platform/microkorg2/MorphEQ](platform/microkorg2/MorphEQ) | morphing EQ (modfx) | fx |
+| [platform/microkorg2/Vibrato](platform/microkorg2/Vibrato) | vibrato (modfx) | fx |
+| [platform/microkorg2/MultitapDelay](platform/microkorg2/MultitapDelay) | multitap delay (delfx) | fx |
+| [platform/microkorg2/breveR](platform/microkorg2/breveR) | reverb (revfx) | fx |
 | [platform/drumlogue/dummy-synth](platform/drumlogue/dummy-synth) | synth (stereo) | osc |
+| [platform/drumlogue/sample-voice](platform/drumlogue/sample-voice) | sample-playback drum voice | osc |
 | [platform/drumlogue/dummy-delfx](platform/drumlogue/dummy-delfx) | effect template (stereo) | fx |
 | [platform/drumlogue/dummy-revfx](platform/drumlogue/dummy-revfx) | effect template (stereo) | fx |
 | [platform/drumlogue/dummy-masterfx](platform/drumlogue/dummy-masterfx) | master FX (4-in/2-out) | fx |
 | [platform/nutekt-digital/waves](platform/nutekt-digital/waves) | oscillator (gen-1) | osc |
+| [platform/nutekt-digital/tremolo](platform/nutekt-digital/tremolo) | modfx example (gen-1) | fx |
 | [platform/minilogue-xd/waves](platform/minilogue-xd/waves) | oscillator (gen-1) | osc |
 | [platform/prologue/waves](platform/prologue/waves) | oscillator (gen-1) | osc |
 
@@ -276,9 +289,9 @@ Projects you can try:
 |----------|-----|--------|---------|
 | NTS-1 mkII | gen-2 | full | — |
 | NTS-3 kaoss | gen-2 | full | X/Y pad shell |
-| microKORG2 | gen-2 | osc + fx templates | **single-voice** osc (`voiceLimit = 1`); the NEON-heavy "real" units (`vox`, `MorphEQ`, `MultitapDelay`, `Vibrato`, `breveR`) are not yet wired — they use direct NEON intrinsics plus KORG's `int_simd.h`/`float_simd.h` runtime-lane paths that need extra SIMDe triage |
-| drumlogue | gen-2 | synth + fx | stereo; NEON via SIMDe (`-msimd128`); sample-bank accessors are stubbed (no sample playback); `masterfx` is fed the stereo source duplicated to 4 input channels |
-| prologue / minilogue xd / NTS-1 mkI | gen-1 | osc | separate q31 harness; pitch via note table; same unified `make websim PROJECT=...` command |
+| microKORG2 | gen-2 | full (osc + fx, incl. real units) | **single-voice** osc (`voiceLimit = 1`); the NEON-heavy real units (`vox`, `MorphEQ`, `MultitapDelay`, `Vibrato`, `breveR`) build via a struct-shape SIMD shim (`websim/dsp/microkorg2/mk2_simd_compat.h` + a shadow `arm_neon.h`) instead of SIMDe — see [WEBSIM_FOLLOWUP_PLAN.md](docs/plans/WEBSIM_FOLLOWUP_PLAN.md) §A |
+| drumlogue | gen-2 | synth + fx (incl. sample playback) | stereo; NEON via SIMDe (`-msimd128`); sample-bank accessors are backed by a **synthetic** host bank (`websim/dsp/drumlogue/dl_sample_bank.h`) so sample units like `sample-voice` play — not the device's real PCM; `masterfx` is fed the stereo source duplicated to 4 input channels |
+| prologue / minilogue xd / NTS-1 mkI | gen-1 | osc + fx | separate q31 osc harness (`legacy_osc_bridge.h`) + a float fx harness (`legacy_fx_bridge.h`, modfx/delfx/revfx; `tremolo` is a worked modfx example); pitch via note table; same unified `make websim PROJECT=...` command |
 
 The infrastructure is shared: every project includes `websim/wasm.mk` (gen-2) or
 `websim/legacy.mk` (gen-1); per-platform firmware-ROM stand-ins and host bridges live under
@@ -315,6 +328,54 @@ make wasm
 
 Edit your DSP in `unit.cc` (or the project headers) and re-run `make wasm`. To start clean,
 `make clean` removes both the `build/` and `sim/` directories.
+
+---
+
+## Headless audio checks (offline render harness) {#headless-render}
+
+`make wasm` needs a browser to hear anything, which CI and headless agents can't observe. The
+**offline render harness** builds the *same* DSP (same bridge, same SIMD shim — only the
+AudioWorklet front-end is swapped out) and runs it under emsdk's bundled **node**, dumping a
+32-bit-float WAV. What you measure here is what the browser plays.
+
+```bash
+# one project -> sim/<project>.render.wav (defaults: osc note 60/69, 1 s; fx sine in)
+make render PROJECT=platform/microkorg2/vox
+make render PROJECT=platform/microkorg2/vox WEBSIM_RENDER_ARGS="out.wav 69 375"   # out, note, blocks
+make render PROJECT=platform/microkorg2/breveR WEBSIM_RENDER_ARGS="rev.wav impulse" # fx: sig=sine|impulse
+
+# every render-capable project, asserting finite (no NaN/Inf) output — the CI smoke
+make render-all
+```
+
+`render-all` covers every project whose `wasm.cc` uses a shared bridge with a render path
+(microKORG2 osc/fx, drumlogue synth/fx, gen-1 osc). The inline **NTS-1 mkII / NTS-3** bridges
+don't have a render `main` yet, so they're skipped (browser only).
+
+Analyse a render with the stdlib-only checker (no numpy/scipy needed):
+
+```bash
+python3 websim/scripts/check_render.py FILE.wav                       # health: peak/rms/NaN
+python3 websim/scripts/check_render.py FILE.wav --expect-hz 440 --tol-cents 50   # osc pitch gate
+python3 websim/scripts/check_render.py FILE.wav --min-rms 1e-4        # fail if silent
+```
+
+It exits non-zero on failure, so it drops straight into CI. For oscillators it estimates the
+fundamental by autocorrelation; e.g. `vox` and the gen-1 `waves` both render note 69 at ~440 Hz.
+Checks are tolerance-based, not bit-exact (the wasm build scalarises NEON, so it won't match the
+ARM build sample-for-sample).
+
+### Manual per-unit browser smoke checklist
+
+For changes that need a real ear/eye (every slider, the keyboard, the UI), open the unit with
+`make websim PROJECT=...` and confirm:
+
+- [ ] the page loads **cross-origin-isolated** (no "SharedArrayBuffer is not defined" in the console);
+- [ ] audio starts on the first user gesture (key press / input-source play);
+- [ ] for oscillators: the on-screen keyboard changes pitch; for effects: the input loop plays through;
+- [ ] **every** slider audibly changes the sound (sweep each end);
+- [ ] no errors or `NaN`/denormal warnings in the browser console;
+- [ ] switching units via the Device/Project comboboxes (`make websim-all`) reloads cleanly.
 
 ---
 

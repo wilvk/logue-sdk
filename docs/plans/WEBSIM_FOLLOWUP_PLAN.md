@@ -1,6 +1,7 @@
 # websim Follow-up Plan — Remaining Work After the Platform Expansion
 
-Status: **proposal / not started**
+Status: **mostly complete** — §A, §B, §C.1, §C.2, §C.4, §E done; §C.3 enabled (no in-repo
+units to wire); §D (microKORG2 polyphony) deferred with rationale below.
 Last updated: 2026-06-23
 Predecessor: [WEBSIM_EXPANSION_PLAN.md](WEBSIM_EXPANSION_PLAN.md) (implemented — all six
 platforms build templates/reference units via `make websim PROJECT=...`).
@@ -82,19 +83,27 @@ Alternative (more surgical, more vendored edits): take the **SIMDe path** and re
 doesn't fix MorphEQ's `.val[]` usage and spreads edits across vendored headers.
 
 ### A.3 Tasks
-- [ ] A.3.1 Inventory the exact `v*` NEON intrinsics used across the five units
-      (`grep -rhoE 'v[a-z0-9_]+\(' platform/microkorg2/{vox,MorphEQ,MultitapDelay,Vibrato,breveR}`).
-- [ ] A.3.2 Write `websim/dsp/microkorg2/arm_neon.h` (struct-shape intrinsic shim) +
-      `mk2_simd_compat.h`; wire via `WEBSIM_EMCC_EXTRA += -include .../mk2_simd_compat.h` and
-      `-I websim/dsp/microkorg2` (already on the path).
-- [ ] A.3.3 Build `vox` (osc bridge); triage remaining intrinsics into the shim.
-- [ ] A.3.4 Build `Vibrato`, `MultitapDelay`, `breveR` (fx bridges; modfx/delfx/revfx →
-      `fx.html`); confirm the typedef collision is gone.
-- [ ] A.3.5 Build `MorphEQ` (modfx) — expect the most triage; verify `.val[]` access compiles.
-- [ ] A.3.6 Wire each unit's `wasm.cc` + Makefile websim stanza; confirm `make list` /
-      `make websim PROJECT=...`.
+- [x] A.3.1 Inventory the exact `v*` NEON intrinsics used across the five units. **Result:**
+      only **5** are used directly, all in `vox`: `vrecpeq_f32`, `vrecpe_f32`, `veorq_s32`,
+      `veor_s32`, `vbslq_s32`. MorphEQ/Vibrato/MultitapDelay/breveR use **none** directly.
+- [x] A.3.2 Wrote `websim/dsp/microkorg2/mk2_simd_compat.h` (5 scalar `.val[]` intrinsics over
+      KORG's struct types; includes only `float_simd.h` — *not* `fixed_simd.h`, which depends on
+      `fixed_math.h` and breaks if pulled early) + `websim/dsp/microkorg2/arm_neon.h` (shadows
+      SIMDe). Wired via `WEBSIM_EMCC_EXTRA := -include .../mk2_simd_compat.h` and the existing
+      `-I .../dsp/microkorg2`. **No `-msimd128` needed** — the struct path is pure scalar C++.
+- [x] A.3.3 Built `vox` (osc bridge). The 5 intrinsics were the only triage.
+- [x] A.3.4 Built `Vibrato`, `MultitapDelay`, `breveR`. The SIMDe collision for the FX units
+      comes from `common/attributes.h` (+ `common/dsp/LinearSmoother.h`) pulling `<arm_neon.h>`
+      *transitively*; the shadow header intercepts it. `breveR` additionally calls KORG's
+      `cortexa7_intrinsics.h` ARM-asm saturating ops (via `fixed_math.h`) — guarded with an
+      `#ifdef __EMSCRIPTEN__` portable path (same pattern as `mk2_utils.h`).
+- [x] A.3.5 Built `MorphEQ` (modfx). `.val[]` access compiles on the struct path; its render
+      method is named `Render`, not `Process`, so the fx bridge gained an `MK2_FX_RENDER` hook.
+- [x] A.3.6 Wired each unit's `wasm.cc` + Makefile websim stanza. `make list` shows all five;
+      `make wasm-build` links each. waves/dummy templates still build (no regression).
 
-**Acceptance:** all five units build and link to wasm via `make wasm`, sliders render, audio plays.
+**Acceptance:** all five units build and link to wasm via `make wasm` — **done**. Slider render /
+audio playback is browser-only; covered headlessly by the §B.1 offline render harness.
 
 ---
 
@@ -102,57 +111,79 @@ doesn't fix MorphEQ's `.val[]` usage and spreads edits across vendored headers.
 
 Builds are verified; **audio output is not** — `emrun` opens Chrome, which CI/agents can't observe.
 
-- [ ] B.1 Add an **offline render harness**: a second emcc target per unit (no AudioWorklet)
-      that calls `Init` + `Process/Render/OSC_CYCLE` for N blocks at a fixed note/params and
-      dumps a WAV/PCM to stdout. Lets correctness be checked headlessly and in CI.
-- [ ] B.2 Golden spot-checks: compare the offline render of one unit per platform against a
-      reference (FFT peak at the played note for oscillators; passthrough/impulse response for
-      fx). Tolerance-based, not bit-exact (NEON scalarization differs).
-- [ ] B.3 Document a manual per-unit smoke checklist in [WEBSIM.md](../../WEBSIM.md)
-      (loads cross-origin-isolated, audio starts on gesture, every slider audible, no console
-      errors).
+- [x] B.1 **Offline render harness** added: `make render` (in `websim/wasm.mk`) rebuilds the same
+      DSP/bridge in `WEBSIM_RENDER` mode — no AudioWorklet — and runs it under emsdk node to dump a
+      32-bit-float WAV (`websim/dsp/wav_writer.h`). The shared bridges (mk2 osc/fx, drumlogue
+      synth/fx, gen-1 legacy osc) gained a `#ifdef WEBSIM_RENDER` `main`; setup was factored into a
+      shared `websim_setup_processor()`. The inline NTS-1 mkII/NTS-3 bridges aren't dual-moded yet.
+- [x] B.2 Golden spot-checks via `websim/scripts/check_render.py` (stdlib-only: peak/RMS/NaN +
+      autocorrelation f0). `vox` and gen-1 `waves` both render note 69 at ~440 Hz (≈1.4 cents).
+      `make render-all` renders every render-capable project and asserts finite output (CI smoke).
+- [x] B.3 Documented in [WEBSIM.md](../../WEBSIM.md#headless-render): render-harness usage, the
+      `check_render.py` gates, and a manual per-unit browser smoke checklist.
 
 ---
 
 ## C. Breadth — more units & effect kinds
 
-- [ ] C.1 **gen-1 effects harness.** Today the legacy harness is osc-only. Add modfx/delfx/revfx
-      bridges for the gen-1 `MODFX_*`/`DELFX_*`/`REVFX_*` entry points (q31, stereo where
-      applicable) → `fx.html`. Reference: the gen-1 `usermodfx.h`/`userdelfx.h`/`userrevfx.h`.
-- [ ] C.2 **gen-1 param metadata from `manifest.json`.** The per-unit `WEBSIM_LEGACY_PARAM_LIST`
-      table is hand-written ([nutekt-digital/waves/wasm.cc](../../platform/nutekt-digital/waves/wasm.cc)).
-      Generate it from `manifest.json` (build-time codegen or a small JSON parse in the bridge)
-      so arbitrary community gen-1 units work without editing C.
-- [ ] C.3 **More gen-1 oscillators** (the large dukesrg/logue catalogue) — once C.2 lands,
-      proving a few non-`waves` units is mostly free.
-- [ ] C.4 **drumlogue sample playback.** The sample-bank accessors are stubbed
-      (`get_sample = nullptr` in [dl_synth_bridge.h](../../websim/dsp/drumlogue/dl_synth_bridge.h)).
-      Implement host stand-ins backed by the `websim/samples/` assets so sample-based drum
-      synths produce sound; revisit `sample_wrapper.h`.
+- [x] C.1 **gen-1 effects harness** added: `websim/dsp/legacy/legacy_fx_bridge.h` handles the
+      `MODFX_*` (5-arg, interleaved stereo in/out + sub) and `DELFX_*`/`REVFX_*` (in-place)
+      entry points → `fx.html`, selected by a `WEBSIM_LEGACY_FX_{MODFX,DELFX,REVFX}` define. It
+      supplies the `_fx_get_bpm[f]` ROM stand-ins (fx_api.h owns the public inlines). Verified
+      with a worked example, [`platform/nutekt-digital/tremolo`](../../platform/nutekt-digital/tremolo)
+      (builds + renders). delfx/revfx share the bridge but aren't exercised by an example yet.
+- [x] C.2 **gen-1 param metadata from `manifest.json`** done: `websim/gen_legacy_params.py` emits
+      `websim_legacy_params.h` (the `WEBSIM_LEGACY_PARAM_LIST` macro) from a unit's manifest.json;
+      `wasm.mk` generates it when a project sets `WEBSIM_LEGACY_MANIFEST` and puts it on the include
+      path. The nutekt-digital / minilogue-xd / prologue `waves` units now include the generated
+      header instead of a hand-written table (all still render note 69 at ~440 Hz).
+- [~] C.3 **More gen-1 oscillators** — *enabled* by C.2 but not exercised: there are no additional
+      gen-1 osc units in-repo. With C.2, wiring a community unit is just dropping its sources + a
+      3-line `wasm.cc` (`#include "userosc.h"` / `"websim_legacy_params.h"` / `"legacy_osc_bridge.h"`)
+      and a Makefile stanza with `WEBSIM_LEGACY_MANIFEST`. No C edits needed.
+- [x] C.4 **drumlogue sample playback** added: `websim/dsp/drumlogue/dl_sample_bank.h` provides a
+      synthetic host sample bank (sine/noise/chord one-shots as `sample_wrapper_t`), wired into the
+      synth bridge's `get_num_sample_banks`/`get_num_samples_for_bank`/`get_sample`. The
+      [`sample-voice`](../../platform/drumlogue/sample-voice) (SmplVox) unit now builds + renders an
+      audible hit. (Synthetic, not the device's real PCM; backing it with the `websim/samples/`
+      assets would need a WAV decoder + FS access — deferred.)
 
 ---
 
 ## D. microKORG2 small polyphony (deferred from v1)
 
-v1 is single-voice (`voiceLimit = 1`). To exercise the real poly render path
-(`outputStride`, `GetBufferOffset`, per-voice pitch, `waves`' inter-voice drift):
-- [ ] D.1 Bump `voiceLimit` in [mk2_osc_bridge.h](../../websim/dsp/microkorg2/mk2_osc_bridge.h),
-      allocate the per-voice output stride, and sum/downmix voices to the worklet output.
-- [ ] D.2 Add a simple voice allocator in the bridge driven by `noteOn`/`noteOff` (round-robin),
-      and (optional) a poly-count control in `osc.html`.
+v1 is single-voice (`voiceLimit = 1`). **Deferred — not implemented.** The output layout is now
+understood (see below); the blocker is verification, not mechanics:
+
+- **Output layout (measured):** for the x4 path, `write_oscillator_output_x4` stores a 4-lane
+  vector at `buffer[GetBufferOffset(ctx,voice,frames) + index*outputStride (+lane)]` with
+  `outputStride = 4`, and `GetBufferOffset = bufferOffset + (voice>>2)*(frames*4)`. So for
+  `voiceLimit = 4`: one group, `outputStride = 4`, buffer = `4*frames`, voices interleaved
+  `[v0 v1 v2 v3]` per sample; for `voiceLimit = 8`: a second group at `frames*4`. The bridge would
+  allocate `voiceLimit*frames`, then downmix.
+- **Why deferred:** vox's per-voice EG is a *mod source*, not an amplitude envelope — per-voice
+  amp gating lives in the synth engine *downstream* of the osc unit, which websim doesn't emulate.
+  So a poly render would sound **all** `voiceLimit` voices continuously (drone) unless the bridge
+  downmixes only currently-held voices. And the offline render harness drives a single
+  `pitch[0]`, so multi-note polyphony can't be verified headlessly — it needs the browser. Rather
+  than ship unverified audio behaviour, this is left for a focused, browser-verified pass.
+- [ ] D.1 Bump `voiceLimit`, allocate `voiceLimit*frames` output, downmix **only active** voices.
+- [ ] D.2 Round-robin voice allocator on `noteOn`/`noteOff` (+ `processor.voiceEvent(...)`), and
+      a poly-count control in `osc.html`; verify in-browser.
 
 ---
 
 ## E. Toolchain, CI & docs
 
-- [ ] E.1 **Pin the Emscripten minimum** in [WEBSIM.md](../../WEBSIM.md): SIMDe `arm_neon.h`
-      support is required (drumlogue), and recent emsdk **rejects**
-      `-I.../emscripten/system/include` (the expansion removed it). Note both.
-- [ ] E.2 **CI smoke build**: a job that runs `make wasm` (build only, skip `emrun`) for every
-      project in `make list` and fails on any compile/link error. Factor a `wasm-build` target
-      (no browser launch) out of `websim/wasm.mk` so CI can call it.
-- [ ] E.3 Keep [WEBSIM.md](../../WEBSIM.md) "Supported platforms & caveats" current as A–D land
-      (drop the "not yet wired" microKORG2 row when A completes).
+- [x] E.1 **Emscripten minimum pinned** in [WEBSIM.md](../../WEBSIM.md) prerequisites (≥3.1.x for
+      SIMDe `arm_neon.h`; must not add `-I.../emscripten/system/include`; CI pins 4.0.16).
+- [x] E.2 **CI smoke** added: [.github/workflows/websim.yml](../../.github/workflows/websim.yml)
+      runs `make build-all` (compile/link every wasm unit; fails on any error) and `make render-all`
+      (render every render-capable unit, assert finite audio). Root `build-all` + `render-all`
+      targets factor the per-project `wasm-build` / `render` (in `websim/wasm.mk`).
+- [x] E.3 [WEBSIM.md](../../WEBSIM.md) kept current: project table + per-platform caveats updated
+      for the microKORG2 real units, drumlogue sample playback, and gen-1 fx; added the headless
+      render-harness section.
 
 ---
 

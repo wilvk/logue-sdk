@@ -43,7 +43,23 @@ WEBSIM_EMCC_EXTRA ?=
 # hardware build: no _unit_base.c, no CMSIS, no linker script.
 WEBSIM_WASMSRC := $(WEBSIM_UNITSRC) $(WEBSIM_DSP)
 
-.PHONY: wasm wasm-build
+.PHONY: wasm wasm-build render
+
+# emsdk-bundled node, used to run the offline render harness headlessly.
+NODE_BIN ?= $(firstword $(wildcard $(TOOLSDIR)/emsdk/node/*/bin/node))
+
+# Optional: derive a gen-1 unit's legacy param table from its manifest.json
+# (instead of a hand-written WEBSIM_LEGACY_PARAM_LIST macro in wasm.cc). A gen-1
+# project sets WEBSIM_LEGACY_MANIFEST := <path/to/manifest.json> and includes
+# "websim_legacy_params.h" in its wasm.cc. See WEBSIM.md §C.2.
+ifdef WEBSIM_LEGACY_MANIFEST
+WEBSIM_INCFLAGS   += -I$(WASMDIR)
+WEBSIM_GEN_PARAMS := $(WASMDIR)/websim_legacy_params.h
+wasm-build render: $(WEBSIM_GEN_PARAMS)
+$(WEBSIM_GEN_PARAMS): $(WEBSIM_LEGACY_MANIFEST)
+	@mkdir -p $(WASMDIR)
+	@python3 $(SANDBOXDIR)/gen_legacy_params.py $< $@
+endif
 
 # Build-only: compile the DSP to wasm and stage the page + assets in WASMDIR,
 # WITHOUT launching a server. `make wasm` adds the emrun launch on top; the root
@@ -74,3 +90,27 @@ wasm-build:
 wasm: wasm-build
 	@echo Opening the sandbox
 	@$(EMCC_BIN_PATH)/emrun --browser chrome --serve_after_close $(WASMDIR)/$(PROJECT).html
+
+# Offline render harness: build the same DSP (same bridge, same SIMD shim) in
+# render mode — no AudioWorklet — and run it under node to dump a WAV. Lets audio
+# correctness be checked headlessly / in CI without a browser. See WEBSIM.md §B.
+#   make render                       -> sim/<project>.render.wav (defaults)
+#   make render WEBSIM_RENDER_ARGS="out.wav 69 375"   (osc: out, note, blocks)
+#   make render WEBSIM_RENDER_ARGS="out.wav impulse"  (fx: out, sig, blocks, freq)
+WEBSIM_RENDER_OUT  ?= $(WASMDIR)/$(PROJECT).render.wav
+WEBSIM_RENDER_ARGS ?= $(WEBSIM_RENDER_OUT)
+render:
+	@echo Building offline render harness
+	@mkdir -p $(WASMDIR)
+	@$(EMCC_BIN_PATH)/emcc -Wno-unknown-attributes -Wno-limited-postlink-optimizations \
+		$(WEBSIM_INCFLAGS) \
+		-DWEBSIM_RENDER \
+		-sNODERAWFS=1 \
+		-sEXIT_RUNTIME=1 \
+		-lembind \
+		-O2 \
+		$(WEBSIM_EMCC_EXTRA) \
+		$(WEBSIM_WASMSRC) \
+		-o $(WASMDIR)/$(PROJECT).render.js
+	@echo Rendering $(PROJECT)
+	@$(NODE_BIN) $(WASMDIR)/$(PROJECT).render.js $(WEBSIM_RENDER_ARGS)

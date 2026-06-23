@@ -17,14 +17,26 @@
 #error "define MK2_FX_CLASS (the microKORG2 effect DSP class) before including mk2_fx_bridge.h"
 #endif
 
+// Most microKORG2 fx classes expose Process(in, out, frames); a few (e.g.
+// MorphEQ) name the render method Render. A unit's wasm.cc can override this
+// before including the bridge: `#define MK2_FX_RENDER Render`.
+#ifndef MK2_FX_RENDER
+#define MK2_FX_RENDER Process
+#endif
+
 #include <emscripten/bind.h>
-#include <emscripten/webaudio.h>
 #include <emscripten/em_math.h>
+#ifndef WEBSIM_RENDER
+#include <emscripten/webaudio.h>
+#endif
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
+#include "../wav_writer.h"
 using namespace emscripten;
 
 // this needs to be big enough for the stereo output, inputs, params and stack
@@ -153,6 +165,27 @@ std::vector<AudioWorkletParameter> getValidParameters()
   return result;
 }
 
+// Shared one-time processor + descriptor setup, used by both the AudioWorklet
+// path and the offline render harness (WEBSIM_RENDER).
+static void websim_setup_processor()
+{
+  s_desc = {};
+  s_desc.target = unit_header.target;
+  s_desc.api = UNIT_API_VERSION;
+  s_desc.samplerate = SAMPLE_RATE;
+  s_desc.frames_per_buffer = WEB_AUDIO_FRAME_SIZE;
+  s_desc.input_channels = 2;
+  s_desc.output_channels = 2;
+  s_desc.hooks.runtime_context = nullptr;
+  s_desc.hooks.sdram_alloc = &websim_sdram_alloc;
+  s_desc.hooks.sdram_free = &websim_sdram_free;
+  s_desc.hooks.sdram_avail = &websim_sdram_avail;
+
+  processor.Init(&s_desc);
+  processor.Reset();
+}
+
+#ifndef WEBSIM_RENDER
 EMSCRIPTEN_BINDINGS(my_module)
 {
   value_object<AudioWorkletParameter>("AudioWorkletParameter")
@@ -191,7 +224,7 @@ bool ProcessAudio(int numInputs, const AudioSampleFrame *inputs,
   for (int i = 0; i < numParams; ++i)
     processor.setParameter(i, static_cast<int32_t>(params[i].data[0]));
 
-  processor.Process(interleavedIn.data(), interleavedOut.data(), WEB_AUDIO_FRAME_SIZE);
+  processor.MK2_FX_RENDER(interleavedIn.data(), interleavedOut.data(), WEB_AUDIO_FRAME_SIZE);
 
   // de-interleave back to planar stereo output
   for (int i = 0; i < WEB_AUDIO_FRAME_SIZE; ++i)
@@ -207,20 +240,7 @@ void AudioWorkletProcessorCreated(EMSCRIPTEN_WEBAUDIO_T audioContext, bool succe
   if (!success)
     return;
 
-  s_desc = {};
-  s_desc.target = unit_header.target;
-  s_desc.api = UNIT_API_VERSION;
-  s_desc.samplerate = SAMPLE_RATE;
-  s_desc.frames_per_buffer = WEB_AUDIO_FRAME_SIZE;
-  s_desc.input_channels = 2;
-  s_desc.output_channels = 2;
-  s_desc.hooks.runtime_context = nullptr;
-  s_desc.hooks.sdram_alloc = &websim_sdram_alloc;
-  s_desc.hooks.sdram_free = &websim_sdram_free;
-  s_desc.hooks.sdram_avail = &websim_sdram_avail;
-
-  processor.Init(&s_desc);
-  processor.Reset();
+  websim_setup_processor();
 
   // single (mono-or-stereo) input, single stereo output
   int outputChannelCounts[1] = {2};
@@ -275,3 +295,64 @@ int main()
 
   emscripten_exit_with_live_runtime();
 }
+
+#else  // WEBSIM_RENDER
+
+// Offline render harness: feed a test signal through the effect for N blocks and
+// write a stereo float WAV. Built without AudioWorklet and run under node (see
+// `make render`); reuses the exact same DSP + SIMD shim as the browser build.
+// See WEBSIM.md §B.
+//   argv: [out.wav] [sig=sine|impulse] [blocks=375 (~1s)] [freq=220]
+int main(int argc, char **argv)
+{
+  const char *out = (argc > 1) ? argv[1] : "render.wav";
+  const char *sig = (argc > 2) ? argv[2] : "sine";
+  const int blocks = (argc > 3) ? std::atoi(argv[3]) : 375;
+  const float freq = (argc > 4) ? (float)std::atof(argv[4]) : 220.f;
+
+  websim_setup_processor();
+  for (int i = 0; i < unit_header.num_params; ++i)
+    processor.setParameter(i, unit_header.params[i].init);
+
+  const bool impulse = (std::strcmp(sig, "impulse") == 0);
+  const double kPi = 3.14159265358979323846;
+  const double dphase = 2.0 * kPi * (double)freq / (double)SAMPLE_RATE;
+
+  std::vector<float> samples;
+  samples.reserve((size_t)blocks * WEB_AUDIO_FRAME_SIZE * 2);
+  double phase = 0.0;
+  long n = 0;
+  for (int b = 0; b < blocks; ++b)
+  {
+    for (int i = 0; i < WEB_AUDIO_FRAME_SIZE; ++i, ++n)
+    {
+      float x;
+      if (impulse)
+        x = (n == 0) ? 1.f : 0.f;
+      else
+      {
+        x = 0.25f * (float)std::sin(phase);
+        phase += dphase;
+      }
+      interleavedIn[2 * i] = x;
+      interleavedIn[2 * i + 1] = x;
+    }
+    processor.MK2_FX_RENDER(interleavedIn.data(), interleavedOut.data(), WEB_AUDIO_FRAME_SIZE);
+    for (int i = 0; i < WEB_AUDIO_FRAME_SIZE; ++i)
+    {
+      samples.push_back(interleavedOut[2 * i]);
+      samples.push_back(interleavedOut[2 * i + 1]);
+    }
+  }
+
+  if (!websim::write_wav_f32(out, samples, 2, SAMPLE_RATE))
+  {
+    std::fprintf(stderr, "render: failed to write %s\n", out);
+    return 1;
+  }
+  std::fprintf(stderr, "render: wrote %s (%zu frames, %s)\n", out,
+               samples.size() / 2, sig);
+  return 0;
+}
+
+#endif  // WEBSIM_RENDER

@@ -1,26 +1,24 @@
-// Shared websim host bridge for drumlogue effects (delfx / revfx / masterfx).
+// Shared websim host bridge for gen-1 (legacy) logue-SDK effects
+// (prologue / minilogue xd / NTS-1 mkI / nutekt-digital): modfx / delfx / revfx.
 //
-// A drumlogue fx project provides a thin wasm.cc:
+// Like the gen-1 osc, these are free C functions, but they process float audio
+// (interleaved stereo, "2 samples per frame"). modfx has a separate in/out and a
+// sub timbre; delfx/revfx process a single buffer in place. A gen-1 fx project
+// provides a thin wasm.cc selecting the type:
 //
-//     #include "delay.h"
-//     #define DL_FX_CLASS Delay
-//     // #define DL_FX_IN_CHANNELS 4   // masterfx only (default 2)
-//     #include "dl_fx_bridge.h"
+//     #include "usermodfx.h"           // or userdelfx.h / userrevfx.h
+//     #define WEBSIM_LEGACY_FX_MODFX   // or _DELFX / _REVFX
+//     #include "legacy_fx_bridge.h"
 //
-// drumlogue effects take interleaved input (2 channels for del/rev, 4 for
-// masterfx) and render interleaved stereo via Process(in, out, frames). The
-// bridge feeds the fx.html input source (duplicated to fill the required input
-// width) and de-interleaves to planar stereo. Build with -msimd128 (SIMDe).
-// See WEBSIM_EXPANSION_PLAN.md §5.
+// The bridge exposes the two always-present 10-bit fx knobs (TIME, DEPTH) as
+// sliders, drives OSC_*-style _hook_init/_hook_param, feeds the fx.html input
+// through _hook_process, and de-interleaves to planar stereo. See
+// WEBSIM_FOLLOWUP_PLAN.md §C.1.
 //
 // reference: https://emscripten.org/docs/api_reference/wasm_audio_worklets.html
 
-#ifndef DL_FX_CLASS
-#error "define DL_FX_CLASS (the drumlogue effect DSP class) before including dl_fx_bridge.h"
-#endif
-
-#ifndef DL_FX_IN_CHANNELS
-#define DL_FX_IN_CHANNELS 2
+#if !defined(WEBSIM_LEGACY_FX_MODFX) && !defined(WEBSIM_LEGACY_FX_DELFX) && !defined(WEBSIM_LEGACY_FX_REVFX)
+#error "define WEBSIM_LEGACY_FX_MODFX | WEBSIM_LEGACY_FX_DELFX | WEBSIM_LEGACY_FX_REVFX before including legacy_fx_bridge.h"
 #endif
 
 #include <emscripten/bind.h>
@@ -38,22 +36,40 @@
 #include "../wav_writer.h"
 using namespace emscripten;
 
+// gen-1 fx entry points (the *FX_INIT/PROCESS/PARAM macros expand to
+// `__attribute__((used)) _hook_*`, so the unit's source defines them; here we
+// declare and call the underlying extern "C" symbols).
+extern "C" {
+void _hook_init(uint32_t platform, uint32_t api);
+void _hook_param(uint8_t index, int32_t value);
+#if defined(WEBSIM_LEGACY_FX_MODFX)
+void _hook_process(const float *main_xn, float *main_yn,
+                   const float *sub_xn, float *sub_yn, uint32_t frames);
+#else
+void _hook_process(float *xn, uint32_t frames);
+#endif
+}
+
 uint8_t audioThreadStack[4096];
 
 constexpr int SAMPLE_RATE = 48000;
 constexpr int WEB_AUDIO_FRAME_SIZE = 128;
-std::array<float, WEB_AUDIO_FRAME_SIZE * DL_FX_IN_CHANNELS> interleavedIn;
-std::array<float, WEB_AUDIO_FRAME_SIZE * 2> interleavedOut;
 
-DL_FX_CLASS processor; // dsp processor instance
-extern const unit_header_t unit_header;
+// Interleaved stereo work buffers (2 samples per frame).
+std::array<float, WEB_AUDIO_FRAME_SIZE * 2> bufIn;
+std::array<float, WEB_AUDIO_FRAME_SIZE * 2> bufOut;
+std::array<float, WEB_AUDIO_FRAME_SIZE * 2> bufSub;  // modfx sub timbre (silent)
 
-static unit_runtime_desc_t s_desc;
+// The two always-present 10-bit fx knobs (TIME == param 0, DEPTH == param 1).
+enum { FX_PARAM_TIME = 0, FX_PARAM_DEPTH = 1 };
 
+// gen-1 fx query tempo via fx_get_bpm()/fx_get_bpmf() (inline wrappers in
+// fx_api.h around the firmware externs _fx_get_bpm/_fx_get_bpmf). Provide those
+// ROM stand-ins here; don't redefine the public inlines (fx_api.h owns them).
 static float BPM_WASM = 120.f;
 void fx_set_bpm(float bpm) { BPM_WASM = bpm; }
-uint16_t fx_get_bpm(void) { return static_cast<uint16_t>(BPM_WASM * 10.f); }
-float fx_get_bpmf(void) { return BPM_WASM; }
+extern "C" uint16_t _fx_get_bpm(void) { return static_cast<uint16_t>(BPM_WASM * 10.f); }
+extern "C" float _fx_get_bpmf(void) { return BPM_WASM; }
 
 struct AudioWorkletParameter
 {
@@ -65,115 +81,36 @@ struct AudioWorkletParameter
   std::string name;
 };
 
+static std::vector<AudioWorkletParameter> buildParameters()
+{
+  std::vector<AudioWorkletParameter> r;
+  r.push_back({0, 1023, 0, 512, 0, std::string("Time")});
+  r.push_back({0, 1023, 0, 512, 0, std::string("Depth")});
+  return r;
+}
+
+std::vector<AudioWorkletParameter> getValidParameters() { return buildParameters(); }
+
 std::string getParameterValueString(int index, int value)
 {
-  const unit_param_t &p = unit_header.params[index];
-
-  std::string suffix;
-
-  switch (p.type)
-  {
-  case k_unit_param_type_none:
-    break;
-  case k_unit_param_type_percent:
-    suffix = "%";
-    break;
-  case k_unit_param_type_db:
-    suffix = " dB";
-    break;
-  case k_unit_param_type_cents:
-    suffix = " cents";
-    break;
-  case k_unit_param_type_semi:
-    suffix = " semitones";
-    break;
-  case k_unit_param_type_oct:
-    suffix = " octaves";
-    break;
-  case k_unit_param_type_hertz:
-    suffix = " Hz";
-    break;
-  case k_unit_param_type_khertz:
-    suffix = " kHz";
-    break;
-  case k_unit_param_type_bpm:
-    suffix = " bpm";
-    break;
-  case k_unit_param_type_msec:
-    suffix = " ms";
-    break;
-  case k_unit_param_type_sec:
-    suffix = " s";
-    break;
-  case k_unit_param_type_enum:
-    break;
-  case k_unit_param_type_strings:
-  {
-    const char *s = processor.getParameterStrValue(index, value);
-    return s ? std::string(s) : std::to_string(value);
-  }
-  case k_unit_param_type_drywet:
-    suffix = "%";
-    break;
-  case k_unit_param_type_pan:
-  case k_unit_param_type_spread:
-    if (value < 0)
-      suffix = "L";
-    else if (value > 0)
-      suffix = "R";
-    else if (value == p.center)
-      return "CNTR";
-    break;
-  case k_unit_param_type_onoff:
-    return value == 0 ? "OFF" : "ON";
-  case k_unit_param_type_midi_note:
-  default:
-    return "unimplemented";
-  };
-
-  std::string numerical;
-  if (p.frac_mode == k_unit_param_frac_mode_fixed)
-    numerical = std::to_string(value / static_cast<double>(1 << p.frac));
-  else
-    numerical = std::to_string(value / std::pow(10.0, p.frac));
-  numerical.erase(numerical.find_last_not_of('0') + 1);
-  if (!numerical.empty() && numerical.back() == '.')
-    numerical.pop_back();
-
-  return numerical + suffix;
+  (void)index;
+  return std::to_string(value);
 }
 
-std::vector<AudioWorkletParameter> getValidParameters()
+// Run one block: build interleaved input from a planar (mono/stereo) source
+// already laid into bufIn's left/right, then call the type-specific hook.
+static inline void websim_fx_block()
 {
-  std::vector<AudioWorkletParameter> result;
-  for (int i = 0; i < unit_header.num_params; ++i)
-  {
-    const unit_param_t &p = unit_header.params[i];
-    if (p.name[0] == '\0' && p.min == 0 && p.max == 0)
-      continue;
-    result.push_back({p.min, p.max, p.center, p.init, p.type, std::string(p.name)});
-  }
-  return result;
+#if defined(WEBSIM_LEGACY_FX_MODFX)
+  std::memset(bufSub.data(), 0, bufSub.size() * sizeof(float));
+  _hook_process(bufIn.data(), bufOut.data(), bufSub.data(), bufSub.data(), WEB_AUDIO_FRAME_SIZE);
+#else
+  std::memcpy(bufOut.data(), bufIn.data(), bufIn.size() * sizeof(float));
+  _hook_process(bufOut.data(), WEB_AUDIO_FRAME_SIZE);  // in place
+#endif
 }
 
-// Shared one-time processor setup, used by both the AudioWorklet path and the
-// offline render harness (WEBSIM_RENDER).
-static void websim_setup_processor()
-{
-  s_desc = {};
-  s_desc.target = unit_header.target;
-  s_desc.api = unit_header.api;
-  s_desc.samplerate = SAMPLE_RATE;
-  s_desc.frames_per_buffer = WEB_AUDIO_FRAME_SIZE;
-  s_desc.input_channels = DL_FX_IN_CHANNELS;
-  s_desc.output_channels = 2;
-  s_desc.get_num_sample_banks = nullptr;
-  s_desc.get_num_samples_for_bank = nullptr;
-  s_desc.get_sample = nullptr;
-
-  processor.Init(&s_desc);
-  processor.Reset();
-}
+static void websim_setup_processor() { _hook_init(0, 0); }
 
 #ifndef WEBSIM_RENDER
 EMSCRIPTEN_BINDINGS(my_module)
@@ -203,25 +140,23 @@ bool ProcessAudio(int numInputs, const AudioSampleFrame *inputs,
   auto &input = inputs[0];
   auto &output = outputs[0];
 
-  // Build the interleaved input the unit expects. The Web Audio source is mono
-  // or stereo (planar); fill DL_FX_IN_CHANNELS by repeating L/R across channels.
   for (int i = 0; i < WEB_AUDIO_FRAME_SIZE; ++i)
   {
     const float l = input.data[i];
     const float r = (input.numberOfChannels == 1) ? l : input.data[i + WEB_AUDIO_FRAME_SIZE];
-    for (int c = 0; c < DL_FX_IN_CHANNELS; ++c)
-      interleavedIn[DL_FX_IN_CHANNELS * i + c] = (c & 1) ? r : l;
+    bufIn[2 * i] = l;
+    bufIn[2 * i + 1] = r;
   }
 
   for (int i = 0; i < numParams; ++i)
-    processor.setParameter(i, static_cast<int32_t>(params[i].data[0]));
+    _hook_param(static_cast<uint8_t>(i), static_cast<int32_t>(params[i].data[0]));
 
-  processor.Process(interleavedIn.data(), interleavedOut.data(), WEB_AUDIO_FRAME_SIZE);
+  websim_fx_block();
 
   for (int i = 0; i < WEB_AUDIO_FRAME_SIZE; ++i)
   {
-    output.data[i] = interleavedOut[2 * i];
-    output.data[WEB_AUDIO_FRAME_SIZE + i] = interleavedOut[2 * i + 1];
+    output.data[i] = bufOut[2 * i];
+    output.data[WEB_AUDIO_FRAME_SIZE + i] = bufOut[2 * i + 1];
   }
   return true;
 }
@@ -288,9 +223,8 @@ int main()
 
 #else  // WEBSIM_RENDER
 
-// Offline render harness: feed a test signal through the effect for N blocks and
-// write a stereo float WAV. Built without AudioWorklet and run under node (see
-// `make render`).
+// Offline render harness: feed a test signal through the gen-1 fx for N blocks
+// and write a stereo float WAV. Built without AudioWorklet, run under node.
 //   argv: [out.wav] [sig=sine|impulse] [blocks=375] [freq=220]
 int main(int argc, char **argv)
 {
@@ -300,8 +234,9 @@ int main(int argc, char **argv)
   const float freq = (argc > 4) ? (float)std::atof(argv[4]) : 220.f;
 
   websim_setup_processor();
-  for (int i = 0; i < unit_header.num_params; ++i)
-    processor.setParameter(i, unit_header.params[i].init);
+  auto params = buildParameters();
+  for (int i = 0; i < (int)params.size(); ++i)
+    _hook_param((uint8_t)i, params[i].init);
 
   const bool impulse = (std::strcmp(sig, "impulse") == 0);
   const double kPi = 3.14159265358979323846;
@@ -323,12 +258,12 @@ int main(int argc, char **argv)
         x = 0.25f * (float)std::sin(phase);
         phase += dphase;
       }
-      for (int c = 0; c < DL_FX_IN_CHANNELS; ++c)
-        interleavedIn[DL_FX_IN_CHANNELS * i + c] = x;
+      bufIn[2 * i] = x;
+      bufIn[2 * i + 1] = x;
     }
-    processor.Process(interleavedIn.data(), interleavedOut.data(), WEB_AUDIO_FRAME_SIZE);
+    websim_fx_block();
     for (int i = 0; i < WEB_AUDIO_FRAME_SIZE * 2; ++i)
-      samples.push_back(interleavedOut[i]);
+      samples.push_back(bufOut[i]);
   }
 
   if (!websim::write_wav_f32(out, samples, 2, SAMPLE_RATE))

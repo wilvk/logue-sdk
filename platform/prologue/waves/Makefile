@@ -239,4 +239,6 @@ WEBSIM_UNITSRC  := wasm.cc $(UCXXSRC) $(UCSRC)
 WEBSIM_DSP      := $(filter-out %/osc_api.cpp %/fx_api.cpp, \
                      $(wildcard $(SANDBOXDIR)/dsp/*.c) $(wildcard $(SANDBOXDIR)/dsp/*.cpp)) \
                    $(wildcard $(SANDBOXDIR)/dsp/legacy/*.cpp)
+# Generate the slider param table from manifest.json (websim_legacy_params.h).
+WEBSIM_LEGACY_MANIFEST := $(PROJECTDIR)/manifest.json
 include $(SANDBOXDIR)/legacy.mk
