@@ -206,7 +206,19 @@
       // AudioContext.resume() is gated behind a user gesture, so we show the
       // "on" state optimistically, try to resume now, and also resume on the
       // first interaction; the button then mirrors context.state.
+      //
+      // Switching projects is a full-page navigation, so the user's on/off
+      // choice is remembered in sessionStorage (per tab) and restored here —
+      // the button stays highlighted across projects unless playback was paused.
       let togglePlaybackButton = document.getElementById("TogglePlaybackButton");
+      const PLAYBACK_KEY = "websim.playbackOn";
+      function wantsPlayback() {
+        try { return sessionStorage.getItem(PLAYBACK_KEY) !== "false"; } // default on
+        catch (e) { return true; }
+      }
+      function rememberPlayback(on) {
+        try { sessionStorage.setItem(PLAYBACK_KEY, on ? "true" : "false"); } catch (e) {}
+      }
       function setPlaybackButton(on) {
         togglePlaybackButton.classList.toggle("active", on);
         togglePlaybackButton.textContent = on ? "Playback On" : "Playback Off";
@@ -214,16 +226,17 @@
       }
       context.addEventListener("statechange", () => setPlaybackButton(context.state === "running"));
       togglePlaybackButton.onclick = () => {
-        if (context.state !== "running") context.resume();
-        else context.suspend();
+        if (context.state !== "running") { rememberPlayback(true); context.resume(); }
+        else { rememberPlayback(false); context.suspend(); }
       };
       function resumePlaybackOnGesture() {
-        if (context.state !== "running") context.resume().catch(() => {});
+        if (wantsPlayback() && context.state !== "running") context.resume().catch(() => {});
       }
       window.addEventListener("pointerdown", resumePlaybackOnGesture, { once: true });
       window.addEventListener("keydown", resumePlaybackOnGesture, { once: true });
-      setPlaybackButton(true);          // default on (selected)
-      context.resume().catch(() => {}); // start now if the browser allows it
+      const startPlaybackOn = wantsPlayback();
+      setPlaybackButton(startPlaybackOn);                    // restore last choice (default on)
+      if (startPlaybackOn) context.resume().catch(() => {}); // start now if the browser allows it
 
       // main volume
       let volumeSlider = document.getElementById("VolumeSlider");

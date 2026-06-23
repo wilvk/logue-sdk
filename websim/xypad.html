@@ -16,13 +16,13 @@
     * { box-sizing: border-box; }
     html, body { height: 100%; }
     body {
-      margin: 0; padding: 16px; overflow: hidden;
+      margin: 0; padding: 16px; overflow: auto;
       font-family: 'Space Grotesk', sans-serif;
       -webkit-font-smoothing: subpixel-antialiased;
       background: radial-gradient(1200px 700px at 15% -10%, #171a21, var(--bg));
       color: var(--text);
     }
-    .app { height: calc(100vh - 32px); display: grid; grid-template-rows: auto 1fr; gap: 14px; }
+    .app { min-height: calc(100vh - 32px); display: grid; grid-template-rows: auto 1fr; gap: 14px; }
 
     .topbar {
       display: flex; align-items: center; flex-wrap: wrap; gap: 16px;
@@ -38,23 +38,27 @@
     .readout { color: var(--accent); font-variant-numeric: tabular-nums; min-width: 38px; font-size: 13px; }
 
     .grid {
-      display: grid; gap: 14px; min-height: 0;
+      display: grid; gap: 14px; min-height: 0; align-content: start;
       grid-template-columns: minmax(540px, 1fr) minmax(430px, .78fr);
-      grid-template-rows: auto auto 1fr;
+      grid-template-rows: auto auto auto;
       grid-template-areas: "osc xy" "scope xy" "params sample";
     }
 
     .panel {
       background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
-      padding: 14px 16px; display: flex; flex-direction: column; min-height: 0;
+      padding: 14px 16px; display: flex; flex-direction: column;
       box-shadow: 0 8px 24px rgba(0, 0, 0, .28);
+      /* Drag the bottom-right corner to resize any panel — lets you reclaim
+         space for a container that's been squashed rather than living with
+         a fixed split. overflow:hidden both clips and enables the handle. */
+      resize: both; overflow: hidden; min-height: 140px; min-width: 220px;
     }
     .panel > h2 {
       margin: 0 0 12px; font-size: 13px; font-weight: 700; letter-spacing: 1.5px;
       text-transform: uppercase; color: var(--accent); display: flex; align-items: center; gap: 10px;
     }
     .panel > h2::before { content: ""; width: 5px; height: 14px; border-radius: 3px; background: var(--accent); }
-    .panel .body { min-height: 0; overflow: auto; }
+    .panel .body { flex: 1; min-height: 0; overflow: auto; }
     .tip { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
     .row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
 
@@ -73,11 +77,19 @@
     input[type=range] { accent-color: var(--accent); }
 
     .scope { display: flex; flex-direction: column; gap: 10px; }
-    #TimeDomain, #FrequencyDomain { max-width: 100%; background: #fff; border-radius: 8px; display: block; }
+    /* Cap the canvas size so the 512x128 bitmaps don't upscale and balloon the
+       Scope panel — that was starving the bottom row (Parameters / Sample). */
+    #TimeDomain, #FrequencyDomain { width: 100%; max-width: 560px; height: auto; background: #fff; border-radius: 8px; display: block; }
     #keyboard { margin-top: 4px; }
 
-    .xywrap { display: flex; align-items: center; gap: 24px; }
-    #XYPad { background: #11131a; border: 2px solid var(--accent); border-radius: 10px; cursor: crosshair; touch-action: none; }
+    /* Keep the pad a compact square centered in its panel rather than stretching
+       to fill the two-row span — a smaller pad leaves the other panels room.
+       The drawing buffer is synced to the rendered size in JS (sizeXYPad) so
+       touch coordinates stay accurate; resizing the panel re-syncs it. */
+    .panel.xy .body { flex: 1; display: flex; align-items: center; justify-content: center; overflow: auto; }
+    .xywrap { display: flex; align-items: stretch; gap: 18px; }
+    #DepthSlider { writing-mode: vertical-lr; direction: rtl; }
+    #XYPad { background: #11131a; border: 2px solid var(--accent); border-radius: 10px; cursor: crosshair; touch-action: none; width: 260px; height: 260px; }
 
     #Samples label { color: var(--muted); font-size: 12px; }
     #Samples audio { width: 100%; margin: 4px 0 12px; }
@@ -164,15 +176,14 @@
         </div>
       </section>
 
-      <section class="panel" style="grid-area: xy;">
+      <section class="panel xy" style="grid-area: xy;">
         <h2>Depth &amp; XY Pad
           <button id="XYPadHold" style="margin-left: auto;">Hold Off</button>
         </h2>
         <div class="body">
           <div class="xywrap">
-            <input type="range" min="0" max="1" value="0.5" step="0.0001" id="DepthSlider"
-              style="writing-mode: vertical-lr; height: 240px; direction: rtl;">
-            <canvas id="XYPad" width="360" height="240"></canvas>
+            <input type="range" min="0" max="1" value="0.5" step="0.0001" id="DepthSlider">
+            <canvas id="XYPad" width="380" height="300"></canvas>
           </div>
         </div>
       </section>
@@ -325,7 +336,19 @@
       // AudioContext.resume() is gated behind a user gesture, so we show the
       // "on" state optimistically, try to resume now, and also resume on the
       // first interaction; the button then mirrors context.state.
+      //
+      // Switching projects is a full-page navigation, so the user's on/off
+      // choice is remembered in sessionStorage (per tab) and restored here —
+      // the button stays highlighted across projects unless playback was paused.
       let togglePlaybackButton = document.getElementById("TogglePlaybackButton");
+      const PLAYBACK_KEY = "websim.playbackOn";
+      function wantsPlayback() {
+        try { return sessionStorage.getItem(PLAYBACK_KEY) !== "false"; } // default on
+        catch (e) { return true; }
+      }
+      function rememberPlayback(on) {
+        try { sessionStorage.setItem(PLAYBACK_KEY, on ? "true" : "false"); } catch (e) {}
+      }
       function setPlaybackButton(on) {
         togglePlaybackButton.classList.toggle("active", on);
         togglePlaybackButton.textContent = on ? "Playback On" : "Playback Off";
@@ -333,16 +356,17 @@
       }
       context.addEventListener("statechange", () => setPlaybackButton(context.state === "running"));
       togglePlaybackButton.onclick = () => {
-        if (context.state !== "running") context.resume();
-        else context.suspend();
+        if (context.state !== "running") { rememberPlayback(true); context.resume(); }
+        else { rememberPlayback(false); context.suspend(); }
       };
       function resumePlaybackOnGesture() {
-        if (context.state !== "running") context.resume().catch(() => {});
+        if (wantsPlayback() && context.state !== "running") context.resume().catch(() => {});
       }
       window.addEventListener("pointerdown", resumePlaybackOnGesture, { once: true });
       window.addEventListener("keydown", resumePlaybackOnGesture, { once: true });
-      setPlaybackButton(true);          // default on (selected)
-      context.resume().catch(() => {}); // start now if the browser allows it
+      const startPlaybackOn = wantsPlayback();
+      setPlaybackButton(startPlaybackOn);                    // restore last choice (default on)
+      if (startPlaybackOn) context.resume().catch(() => {}); // start now if the browser allows it
 
       // main volume
       let volumeSlider = document.getElementById("VolumeSlider");
@@ -526,6 +550,20 @@
 
       // XY Pad
       let xyPad = document.getElementById("XYPad");
+
+      // The pad stretches to fill its panel (CSS flex); keep the drawing buffer
+      // matched to the rendered size so touch coordinates map 1:1. Changing the
+      // buffer doesn't affect layout, so observing the element can't loop.
+      function sizeXYPad() {
+        let rect = xyPad.getBoundingClientRect();
+        if (rect.width && rect.height) {
+          xyPad.width = Math.round(rect.width);
+          xyPad.height = Math.round(rect.height);
+        }
+      }
+      sizeXYPad();
+      new ResizeObserver(sizeXYPad).observe(xyPad);
+
       let holdButton = document.getElementById("XYPadHold");
       let xyPadHold = false;
       holdButton.onclick = function () {

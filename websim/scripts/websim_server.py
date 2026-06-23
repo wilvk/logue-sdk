@@ -61,6 +61,16 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Cross-Origin-Resource-Policy", "cross-origin")
         super().end_headers()
 
+    def copyfile(self, source, outputfile):
+        # Browsers routinely abort in-flight responses (navigation, the
+        # compile-on-demand redirect, AudioWorklet/wasm reloads, media range
+        # seeks). That surfaces as BrokenPipeError/ConnectionResetError mid-send;
+        # it's expected, so don't dump a traceback for it.
+        try:
+            super().copyfile(source, outputfile)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def do_GET(self):
         if urlparse(self.path).path == "/api/compile":
             return self.handle_compile()
