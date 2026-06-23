@@ -146,13 +146,20 @@ websim-all: check
 	@echo "==> Building $(words $(WEBSIM_ALL_PROJECTS)) project(s) into $(WEBSIM_SIM_ROOT)"
 	@rm -rf $(WEBSIM_SIM_ROOT)
 	@mkdir -p $(WEBSIM_SIM_ROOT)
-	@set -e; for p in $(WEBSIM_ALL_PROJECTS); do \
+	@failed=""; for p in $(WEBSIM_ALL_PROJECTS); do \
 	  plat=$$(basename $$(dirname $$p)); \
 	  proj=$$(basename $$p); \
 	  echo "==> $$plat/$$proj"; \
-	  $(MAKE) --no-print-directory -C "$$p" wasm-build \
-	    WASMDIR="$(abspath $(WEBSIM_SIM_ROOT))/$$plat/$$proj"; \
-	done
+	  if ! $(MAKE) --no-print-directory -C "$$p" wasm-build \
+	      WASMDIR="$(abspath $(WEBSIM_SIM_ROOT))/$$plat/$$proj"; then \
+	    echo "!!  skipping $$plat/$$proj — build failed"; \
+	    rm -rf "$(abspath $(WEBSIM_SIM_ROOT))/$$plat/$$proj"; \
+	    failed="$$failed $$plat/$$proj"; \
+	  fi; \
+	done; \
+	if [ -n "$$failed" ]; then \
+	  printf '\n!!  skipped (failed to build):%s\n\n' "$$failed"; \
+	fi
 	@python3 websim/gen_manifest.py $(WEBSIM_SIM_ROOT) .
 	@echo "==> Opening the websim launcher"
 	@$(EMCC_BIN_PATH)/emrun --browser chrome --serve_after_close \
