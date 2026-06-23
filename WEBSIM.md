@@ -289,7 +289,7 @@ Projects you can try:
 |----------|-----|--------|---------|
 | NTS-1 mkII | gen-2 | full | — |
 | NTS-3 kaoss | gen-2 | full | X/Y pad shell |
-| microKORG2 | gen-2 | full (osc + fx, incl. real units) | **single-voice** osc (`voiceLimit = 1`); the NEON-heavy real units (`vox`, `MorphEQ`, `MultitapDelay`, `Vibrato`, `breveR`) build via a struct-shape SIMD shim (`websim/dsp/microkorg2/mk2_simd_compat.h` + a shadow `arm_neon.h`) instead of SIMDe — see [WEBSIM_FOLLOWUP_PLAN.md](docs/plans/WEBSIM_FOLLOWUP_PLAN.md) §A |
+| microKORG2 | gen-2 | full (osc + fx, incl. real units) | osc is single-voice by default; `vox` runs **4-voice** polyphony (opt-in `MK2_OSC_VOICES`, round-robin allocator, ≤`kMk2BufferSize` sub-blocks). The NEON-heavy real units (`vox`, `MorphEQ`, `MultitapDelay`, `Vibrato`, `breveR`) build via a struct-shape SIMD shim (`websim/dsp/microkorg2/mk2_simd_compat.h` + a shadow `arm_neon.h`) instead of SIMDe — see [WEBSIM_FOLLOWUP_PLAN.md](docs/plans/WEBSIM_FOLLOWUP_PLAN.md) §A, §D |
 | drumlogue | gen-2 | synth + fx (incl. sample playback) | stereo; NEON via SIMDe (`-msimd128`); sample-bank accessors are backed by a **synthetic** host bank (`websim/dsp/drumlogue/dl_sample_bank.h`) so sample units like `sample-voice` play — not the device's real PCM; `masterfx` is fed the stereo source duplicated to 4 input channels |
 | prologue / minilogue xd / NTS-1 mkI | gen-1 | osc + fx | separate q31 osc harness (`legacy_osc_bridge.h`) + a float fx harness (`legacy_fx_bridge.h`, modfx/delfx/revfx; `tremolo` is a worked modfx example); pitch via note table; same unified `make websim PROJECT=...` command |
 
@@ -358,6 +358,14 @@ Analyse a render with the stdlib-only checker (no numpy/scipy needed):
 python3 websim/scripts/check_render.py FILE.wav                       # health: peak/rms/NaN
 python3 websim/scripts/check_render.py FILE.wav --expect-hz 440 --tol-cents 50   # osc pitch gate
 python3 websim/scripts/check_render.py FILE.wav --min-rms 1e-4        # fail if silent
+python3 websim/scripts/check_render.py FILE.wav --peaks 220,261.63,329.63   # poly chord: all present
+```
+
+For polyphonic units, render a chord and check every tone is present:
+
+```bash
+make render PROJECT=platform/microkorg2/vox WEBSIM_RENDER_ARGS="vox.wav 57,60,64"
+python3 websim/scripts/check_render.py vox.wav --peaks 220,261.63,329.63   # A-minor triad
 ```
 
 It exits non-zero on failure, so it drops straight into CI. For oscillators it estimates the

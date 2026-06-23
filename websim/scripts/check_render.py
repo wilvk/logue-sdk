@@ -53,6 +53,21 @@ def mono(samples, channels):
             for i in range(0, len(samples) - channels + 1, channels)]
 
 
+def goertzel_power(x, sr, f):
+    """Normalised power of signal x at frequency f (steady second half)."""
+    x = x[len(x) // 2:]
+    n = len(x)
+    if n == 0 or f <= 0:
+        return 0.0
+    w = 2.0 * math.pi * f / sr
+    c = 2.0 * math.cos(w)
+    s1 = s2 = 0.0
+    for v in x:
+        s0 = v + c * s1 - s2
+        s2, s1 = s1, s0
+    return (s1 * s1 + s2 * s2 - c * s1 * s2) / (n * n)
+
+
 def estimate_f0(x, sr, fmin=40.0, fmax=2000.0):
     """Autocorrelation fundamental estimate over the steadier second half."""
     x = x[len(x) // 2:]
@@ -79,6 +94,11 @@ def main():
     ap.add_argument("--expect-hz", type=float, default=None)
     ap.add_argument("--tol-cents", type=float, default=50.0)
     ap.add_argument("--min-rms", type=float, default=None)
+    ap.add_argument("--peaks", default=None,
+                    help="comma-separated Hz that must all be present at comparable "
+                         "energy (poly chord check)")
+    ap.add_argument("--peak-ratio", type=float, default=0.1,
+                    help="min(power)/max(power) across --peaks required to pass")
     args = ap.parse_args()
 
     ch, sr, samples = read_wav_f32(args.wav)
@@ -104,6 +124,18 @@ def main():
         print("f0 est     : %.2f Hz (expect %.2f, %.1f cents)" % (f0, args.expect_hz, cents))
         if abs(cents) > args.tol_cents:
             print("FAIL: pitch off by %.1f cents (tol %.1f)" % (cents, args.tol_cents)); ok = False
+    if args.peaks:
+        m = mono(samples, ch)
+        freqs = [float(x) for x in args.peaks.split(",")]
+        powers = [goertzel_power(m, sr, f) for f in freqs]
+        pmax = max(powers) if powers else 0.0
+        for f, p in zip(freqs, powers):
+            rel = (p / pmax) if pmax > 0 else 0.0
+            print("peak %.1f Hz : power %.3e (%.2f of max)" % (f, p, rel))
+        worst = min((p / pmax) for p in powers) if pmax > 0 else 0.0
+        if worst < args.peak_ratio:
+            print("FAIL: a requested pitch is weak/absent (%.2f < %.2f)" % (worst, args.peak_ratio))
+            ok = False
 
     print("RESULT     : %s" % ("PASS" if ok else "FAIL"))
     return 0 if ok else 1

@@ -1,7 +1,7 @@
 # websim Follow-up Plan — Remaining Work After the Platform Expansion
 
-Status: **mostly complete** — §A, §B, §C.1, §C.2, §C.4, §E done; §C.3 enabled (no in-repo
-units to wire); §D (microKORG2 polyphony) deferred with rationale below.
+Status: **complete** — §A, §B, §C.1, §C.2, §C.4, §D, §E done; §C.3 enabled (no in-repo units to
+wire). §D landed after fixing two real bugs in vox's never-before-exercised x4 path (see §D).
 Last updated: 2026-06-23
 Predecessor: [WEBSIM_EXPANSION_PLAN.md](WEBSIM_EXPANSION_PLAN.md) (implemented — all six
 platforms build templates/reference units via `make websim PROJECT=...`).
@@ -150,26 +150,33 @@ Builds are verified; **audio output is not** — `emrun` opens Chrome, which CI/
 
 ---
 
-## D. microKORG2 small polyphony (deferred from v1)
+## D. microKORG2 small polyphony — implemented
 
-v1 is single-voice (`voiceLimit = 1`). **Deferred — not implemented.** The output layout is now
-understood (see below); the blocker is verification, not mechanics:
+v1 was single-voice; `vox` now opts into **4-voice** polyphony.
 
-- **Output layout (measured):** for the x4 path, `write_oscillator_output_x4` stores a 4-lane
-  vector at `buffer[GetBufferOffset(ctx,voice,frames) + index*outputStride (+lane)]` with
-  `outputStride = 4`, and `GetBufferOffset = bufferOffset + (voice>>2)*(frames*4)`. So for
-  `voiceLimit = 4`: one group, `outputStride = 4`, buffer = `4*frames`, voices interleaved
-  `[v0 v1 v2 v3]` per sample; for `voiceLimit = 8`: a second group at `frames*4`. The bridge would
-  allocate `voiceLimit*frames`, then downmix.
-- **Why deferred:** vox's per-voice EG is a *mod source*, not an amplitude envelope — per-voice
-  amp gating lives in the synth engine *downstream* of the osc unit, which websim doesn't emulate.
-  So a poly render would sound **all** `voiceLimit` voices continuously (drone) unless the bridge
-  downmixes only currently-held voices. And the offline render harness drives a single
-  `pitch[0]`, so multi-note polyphony can't be verified headlessly — it needs the browser. Rather
-  than ship unverified audio behaviour, this is left for a focused, browser-verified pass.
-- [ ] D.1 Bump `voiceLimit`, allocate `voiceLimit*frames` output, downmix **only active** voices.
-- [ ] D.2 Round-robin voice allocator on `noteOn`/`noteOff` (+ `processor.voiceEvent(...)`), and
-      a poly-count control in `osc.html`; verify in-browser.
+- [x] D.1 The osc bridge gained an opt-in `MK2_OSC_VOICES` (default 1). At 4 it sets
+      `voiceLimit = 4`, `outputStride = 4` (one x4 voice group; output interleaved `[v0..v3]` per
+      sample) and downmixes **only currently-held** voices (average → consistent level, no clipping
+      or droning of idle voices). `vox/wasm.cc` sets `MK2_OSC_VOICES 4`; waves/dummy stay mono.
+- [x] D.2 Round-robin voice allocator in the bridge (`noteOn`/`noteOff` → per-voice `pitch[v]` +
+      `processor.voiceEvent(allocation/release)`); pitch comes from the (exact) note number. The
+      render harness accepts a comma-separated chord (`make render ... WEBSIM_RENDER_ARGS="out.wav
+      57,60,64"`) and `check_render.py --peaks` (Goertzel) verifies all chord tones are present at
+      comparable energy — `vox` renders a stable A-minor triad (220/261.6/329.6 Hz); a single note
+      fails the 3-peak check (true discrimination).
+
+**Two real bugs found and fixed while enabling the x4 path (which the shipped single-voice scalar
+path never exercised):**
+1. **Buffer overflow (the divergence):** `vox`'s `mOscBuffer` is `kMk2HalfVoices*kMk2BufferSize`
+   = 256 floats (the unit's hardware block is 64). websim renders a 128-sample Web Audio quantum;
+   mono writes `mOscBuffer[i]` (≤128, fits) but the x4 path writes `mOscBuffer[i*4+v]` up to 511,
+   overrunning 256 and corrupting adjacent member arrays (e.g. `mNoiseLevelMod` → spurious noise →
+   the high-Q formant filter rang up → divergence to ~10³). Fix: the bridge renders in
+   `≤ kMk2BufferSize`-sample sub-blocks (poly only; mono keeps its single 128 call).
+2. **UB in `float_simd.h`:** `si_i32x{2,4}qn_to_f32x{2,4}` non-NEON path computed
+   `1.f / (1 << qPoint)` — `1 << 31` is signed-int overflow (UB). It only ever ran via `UpdateEg`
+   with a 0 phase before, so it was masked. Fixed to `1.f / (float)((uint64_t)1 << qPoint)`
+   (ARM build uses the NEON `vcvtq_n_f32_s32` branch, unaffected).
 
 ---
 

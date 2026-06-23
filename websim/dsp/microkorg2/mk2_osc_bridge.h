@@ -26,6 +26,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 #include "../wav_writer.h"
@@ -36,7 +37,33 @@ uint8_t audioThreadStack[4096];
 
 constexpr int SAMPLE_RATE = 48000;
 constexpr int WEB_AUDIO_FRAME_SIZE = 128;
-std::array<float, WEB_AUDIO_FRAME_SIZE> interleavedOut;
+
+// Number of voices to render. v1 default is single-voice; a unit opts into small
+// polyphony by defining MK2_OSC_VOICES before including this bridge — vox uses 4.
+// Poly drives one microKORG2 "x4" voice group: per-voice pitch from a round-robin
+// allocator, output interleaved [v0..v3] per sample (outputStride = 4), downmixed
+// to mono over the currently-held voices. 4 is the natural value (a single x4
+// group with GetBufferOffset == bufferOffset); see WEBSIM_FOLLOWUP_PLAN.md §D.
+#ifndef MK2_OSC_VOICES
+#define MK2_OSC_VOICES 1
+#endif
+#if MK2_OSC_VOICES != 1 && MK2_OSC_VOICES != 4
+#error "MK2_OSC_VOICES must be 1 (mono) or 4 (one x4 voice group)"
+#endif
+
+// The microKORG2 oscillator processes blocks of at most kMk2BufferSize samples
+// per voice — its internal mOscBuffer is sized kMk2HalfVoices*kMk2BufferSize. The
+// Web Audio quantum is 128, larger than kMk2BufferSize (64), so the x4 (poly)
+// path would overrun mOscBuffer (4*128 > 4*64) and corrupt adjacent state. Render
+// in <= kMk2BufferSize-sample sub-blocks for poly; mono fits 128 in one call so
+// keep it unchanged. See WEBSIM_FOLLOWUP_PLAN.md §D.
+#if MK2_OSC_VOICES > 1
+constexpr int MK2_OSC_BLOCK = kMk2BufferSize;
+#else
+constexpr int MK2_OSC_BLOCK = WEB_AUDIO_FRAME_SIZE;
+#endif
+std::array<float, MK2_OSC_BLOCK * MK2_OSC_VOICES> interleavedOut;
+std::array<float, MK2_OSC_BLOCK> monoOut;  // downmixed sub-block output
 
 MK2_OSC_CLASS processor; // dsp processor instance
 extern const unit_header_t unit_header;
@@ -161,6 +188,48 @@ std::vector<AudioWorkletParameter> getValidParameters()
   return result;
 }
 
+#if MK2_OSC_VOICES > 1
+// --- small polyphony: round-robin voice allocator -------------------------
+static struct VoiceSlot { bool active; uint8_t note; uint32_t age; } s_voices[MK2_OSC_VOICES];
+static uint32_t s_voice_age = 0;
+
+static int websim_alloc_voice()
+{
+  int oldest = 0;
+  uint32_t oldest_age = 0xFFFFFFFFu;
+  for (int v = 0; v < MK2_OSC_VOICES; ++v)
+  {
+    if (!s_voices[v].active)
+      return v;  // prefer a free voice
+    if (s_voices[v].age < oldest_age) { oldest_age = s_voices[v].age; oldest = v; }
+  }
+  return oldest;  // else steal the oldest
+}
+
+void noteOn(uint8_t note, uint8_t velocity)
+{
+  const int v = websim_alloc_voice();
+  s_voices[v] = { true, note, ++s_voice_age };
+  s_osc_ctx.pitch[v] = static_cast<float>(note);
+  processor.voiceEvent(k_voice_event_allocation, v, note, velocity);
+}
+
+void noteOff(uint8_t note)
+{
+  for (int v = 0; v < MK2_OSC_VOICES; ++v)
+    if (s_voices[v].active && s_voices[v].note == note)
+    {
+      s_voices[v].active = false;
+      processor.voiceEvent(k_voice_event_release, v, note, 0);
+    }
+}
+
+// In poly mode pitch comes from the (exact, integer) note number; the continuous
+// frequency from osc.html's keyboard is redundant, so ignore it.
+void setOscPitch(float f0) { (void)f0; }
+
+#else
+// --- single-voice (default) ------------------------------------------------
 // Set oscillator pitch from a frequency by converting to the fractional MIDI
 // note number the microKORG2 osc context expects (A4 = 440 Hz = note 69).
 void setOscPitch(float f0)
@@ -182,17 +251,46 @@ void noteOn(uint8_t note, uint8_t velocity)
 }
 
 void noteOff(uint8_t note) { (void)note; }
+#endif  // MK2_OSC_VOICES > 1
+
+// Downmix one rendered sub-block (n samples) of the voice buffer to mono. In poly
+// mode, average the currently held voices (consistent level, no clipping); in mono
+// mode it's a straight copy.
+static inline void websim_mix_to_mono(int n)
+{
+#if MK2_OSC_VOICES > 1
+  int active = 0;
+  for (int v = 0; v < MK2_OSC_VOICES; ++v) active += s_voices[v].active ? 1 : 0;
+  const float g = active ? 1.0f / static_cast<float>(active) : 0.f;
+  for (int i = 0; i < n; ++i)
+  {
+    float acc = 0.f;
+    for (int v = 0; v < MK2_OSC_VOICES; ++v)
+      if (s_voices[v].active) acc += interleavedOut[i * MK2_OSC_VOICES + v];
+    monoOut[i] = acc * g;
+  }
+#else
+  for (int i = 0; i < n; ++i)
+    monoOut[i] = interleavedOut[i];
+#endif
+}
 
 // Shared one-time processor + runtime-context setup, used by both the
 // AudioWorklet path and the offline render harness (WEBSIM_RENDER).
 static void websim_setup_processor()
 {
-  // Single-voice osc context.
   s_osc_ctx = {};
-  s_osc_ctx.pitch[0] = 60.f; // default middle C until a key is pressed
+  for (int v = 0; v < kMk2MaxVoices; ++v) s_osc_ctx.pitch[v] = 60.f; // middle C until played
+#if MK2_OSC_VOICES > 1
+  for (int v = 0; v < MK2_OSC_VOICES; ++v) s_voices[v] = { false, 0, 0 };
+  s_voice_age = 0;
+  s_osc_ctx.voiceLimit = MK2_OSC_VOICES;
+  s_osc_ctx.outputStride = 4;  // the x4 group writes 4 interleaved lanes per sample
+#else
   s_osc_ctx.voiceLimit = 1;
-  s_osc_ctx.voiceOffset = 0;
   s_osc_ctx.outputStride = 1;
+#endif
+  s_osc_ctx.voiceOffset = 0;
   s_osc_ctx.bufferOffset = 0;
   s_osc_ctx.modDataSize = kMk2MaxVoices;
   s_osc_ctx.unitModDataPlus = s_mod_plus;
@@ -248,15 +346,19 @@ bool ProcessAudio(int numInputs, const AudioSampleFrame *inputs,
     processor.setParameter(i, static_cast<int32_t>(params[i].data[0]));
   }
 
+  for (int off = 0; off < WEB_AUDIO_FRAME_SIZE; off += MK2_OSC_BLOCK)
+  {
+    const int n = (WEB_AUDIO_FRAME_SIZE - off < MK2_OSC_BLOCK) ? (WEB_AUDIO_FRAME_SIZE - off) : MK2_OSC_BLOCK;
 #ifdef MK2_OSC_PROCESS_HAS_IN
-  // Some templates (e.g. dummy-osc) keep the (in, out, frames) signature.
-  processor.Process(nullptr, interleavedOut.data(), WEB_AUDIO_FRAME_SIZE);
+    // Some templates (e.g. dummy-osc) keep the (in, out, frames) signature.
+    processor.Process(nullptr, interleavedOut.data(), n);
 #else
-  processor.Process(interleavedOut.data(), WEB_AUDIO_FRAME_SIZE);
+    processor.Process(interleavedOut.data(), n);
 #endif
-
-  for (int i = 0; i < WEB_AUDIO_FRAME_SIZE; ++i)
-    output.data[i] = interleavedOut[i];
+    websim_mix_to_mono(n);
+    for (int i = 0; i < n; ++i)
+      output.data[off + i] = monoOut[i];
+  }
 
   return true; // Keep the graph output going
 }
@@ -323,19 +425,31 @@ int main()
 
 #else  // WEBSIM_RENDER
 
-// Offline render harness: render N blocks of the oscillator at a fixed MIDI note
-// and write a mono float WAV. Built without AudioWorklet and run under node
-// (see `make render`); reuses the exact same DSP + SIMD shim as the browser
-// build, so it validates audio correctness headlessly. See WEBSIM.md §B.
-//   argv: [out.wav] [midiNote=60] [blocks=375 (~1s @48k/128)]
+// Offline render harness: render N blocks of the oscillator and write a mono
+// float WAV. Built without AudioWorklet and run under node (see `make render`);
+// reuses the exact same DSP + SIMD shim as the browser build, so it validates
+// audio correctness headlessly. See WEBSIM.md §B.
+//   argv: [out.wav] [note(s)=60] [blocks=375 (~1s @48k/128)]
+//   In poly builds (MK2_OSC_VOICES>1) the note arg may be a comma-separated
+//   chord, e.g. "57,60,64" — one voice per note. See WEBSIM_FOLLOWUP_PLAN.md §D.
 int main(int argc, char **argv)
 {
   const char *out = (argc > 1) ? argv[1] : "render.wav";
-  const float note = (argc > 2) ? (float)std::atof(argv[2]) : 60.f;
+  const char *notes = (argc > 2) ? argv[2] : "60";
   const int blocks = (argc > 3) ? std::atoi(argv[3]) : 375;
 
   websim_setup_processor();
-  s_osc_ctx.pitch[0] = note;
+
+#if MK2_OSC_VOICES > 1
+  // Trigger one voice per comma-separated note (chord).
+  char buf[128];
+  std::strncpy(buf, notes, sizeof(buf) - 1);
+  buf[sizeof(buf) - 1] = '\0';
+  for (char *tok = std::strtok(buf, ","); tok; tok = std::strtok(nullptr, ","))
+    noteOn(static_cast<uint8_t>(std::atoi(tok)), 100);
+#else
+  s_osc_ctx.pitch[0] = (float)std::atof(notes);
+#endif
 
   // Drive params to their init values (k-rate, as the worklet would).
   for (int i = 0; i < unit_header.num_params; ++i)
@@ -344,22 +458,25 @@ int main(int argc, char **argv)
   std::vector<float> samples;
   samples.reserve((size_t)blocks * WEB_AUDIO_FRAME_SIZE);
   for (int b = 0; b < blocks; ++b)
-  {
+    for (int off = 0; off < WEB_AUDIO_FRAME_SIZE; off += MK2_OSC_BLOCK)
+    {
+      const int n = (WEB_AUDIO_FRAME_SIZE - off < MK2_OSC_BLOCK) ? (WEB_AUDIO_FRAME_SIZE - off) : MK2_OSC_BLOCK;
 #ifdef MK2_OSC_PROCESS_HAS_IN
-    processor.Process(nullptr, interleavedOut.data(), WEB_AUDIO_FRAME_SIZE);
+      processor.Process(nullptr, interleavedOut.data(), n);
 #else
-    processor.Process(interleavedOut.data(), WEB_AUDIO_FRAME_SIZE);
+      processor.Process(interleavedOut.data(), n);
 #endif
-    for (int i = 0; i < WEB_AUDIO_FRAME_SIZE; ++i)
-      samples.push_back(interleavedOut[i]);
-  }
+      websim_mix_to_mono(n);
+      for (int i = 0; i < n; ++i)
+        samples.push_back(monoOut[i]);
+    }
 
   if (!websim::write_wav_f32(out, samples, 1, SAMPLE_RATE))
   {
     std::fprintf(stderr, "render: failed to write %s\n", out);
     return 1;
   }
-  std::fprintf(stderr, "render: wrote %s (%zu samples, note %.1f)\n", out, samples.size(), note);
+  std::fprintf(stderr, "render: wrote %s (%zu samples, notes %s)\n", out, samples.size(), notes);
   return 0;
 }
 

@@ -1351,7 +1351,7 @@
  #if defined(NEON_SIMD_FP)
    return vcvtq_n_f32_s32(x, qPoint);
  #else
-   const float divisor = 1.f / (1 << qPoint);
+   const float divisor = 1.f / (float)((uint64_t)1 << qPoint);  // 1<<31 as signed int is UB
    const float32x4_t tmp = {{(float)x.val[0] * divisor, (float)x.val[1] * divisor, (float)x.val[2] * divisor, (float)x.val[3] * divisor}};
    return tmp;
  #endif
@@ -1363,7 +1363,7 @@
  #if defined(NEON_SIMD_FP)
    return vcvt_n_f32_s32(x, qPoint);
  #else
-   const float divisor = 1.f / (1 << qPoint);
+   const float divisor = 1.f / (float)((uint64_t)1 << qPoint);  // 1<<31 as signed int is UB
    const float32x2_t tmp = {{(float)x.val[0] * divisor, (float)x.val[1] * divisor}};
    return tmp;
  #endif
