@@ -21,8 +21,13 @@ PROJECT ?= platform/nts-1_mkii/waves
 EMSDK_DIR := tools/emsdk
 EMSDK     := $(EMSDK_DIR)/emsdk
 
-# Auto-discover every project that defines a `wasm:` target.
-WASM_PROJECTS := $(patsubst %/Makefile,%,$(shell grep -rl '^wasm:' platform/*/*/Makefile 2>/dev/null))
+# Auto-discover every project that can build a wasm sandbox: either it defines a
+# literal `wasm:` target (legacy/inline) or it includes a shared websim fragment
+# (websim/wasm.mk for gen-2, websim/legacy.mk for gen-1). Matching both keeps any
+# not-yet-migrated project working during the transition.
+WASM_PROJECTS := $(patsubst %/Makefile,%,$(shell \
+    grep -rlE '^(wasm:|[[:space:]]*include .*/(wasm|legacy)\.mk)' \
+    platform/*/*/Makefile 2>/dev/null))
 
 # Resolve $(PROJECT) to a project directory at recipe time:
 #   - a real path containing a Makefile is used as-is
@@ -69,9 +74,14 @@ help:
 	@echo ""
 	@echo "Examples:"
 	@echo "  make setup"
-	@echo "  make websim"
+	@echo "  make websim                                            # default (NTS-1 mkII waves)"
 	@echo "  make websim PROJECT=platform/nts-3_kaoss/pluck"
-	@echo "  make websim PROJECT=dummy-osc"
+	@echo "  make websim PROJECT=platform/microkorg2/waves          # microKORG2 (gen-2)"
+	@echo "  make websim PROJECT=platform/drumlogue/dummy-synth     # drumlogue (stereo synth)"
+	@echo "  make websim PROJECT=platform/nutekt-digital/waves      # NTS-1 mkI / gen-1 osc"
+	@echo "  make websim PROJECT=platform/minilogue-xd/waves        # minilogue xd / gen-1 osc"
+	@echo "  make websim PROJECT=platform/prologue/waves            # prologue / gen-1 osc"
+	@echo "  make websim PROJECT=dummy-osc                          # bare name (must be unambiguous)"
 
 # Clear stale emsdk env vars for the bootstrap. Sourcing emsdk_env.sh in a
 # shell profile exports EMSDK_PYTHON / EMSDK_NODE / SSL_CERT_FILE pointing into

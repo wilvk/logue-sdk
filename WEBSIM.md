@@ -5,9 +5,11 @@ run it in a browser, with a virtual keyboard and live parameter sliders, instead
 flashing hardware on every change. Because the *same* processor class compiles to both
 targets, what you hear in the browser is what ships to the synth.
 
-> Supported platforms: **Nu:Tekt NTS-1 digital kit mkII** and **Nu:Tekt NTS-3 kaoss pad
-> kit** (the Cortex-M7 targets). The web sim is not available for prologue, minilogue xd,
-> NTS-1 mkI, drumlogue, or microKORG2.
+> Supported platforms: **all six** logue-SDK targets —
+> **NTS-1 mkII**, **NTS-3 kaoss** (gen-2), **microKORG2** (gen-2),
+> **drumlogue** (gen-2, stereo), and **prologue / minilogue xd / NTS-1 mkI**
+> (gen-1, via `nutekt-digital`). See the per-platform caveats under
+> [Supported platforms & caveats](#supported-platforms--caveats).
 
 ---
 
@@ -200,9 +202,9 @@ instructions above. This avoids the `make`/path issues entirely.
 > `make websim PROJECT=<name>` (from the repo root) does this for you. The steps below are
 > the manual equivalent — running `make wasm` directly inside a project.
 
-Run `make wasm` from inside any **NTS-1 mkII** or **NTS-3 kaoss** project directory. The
+Run `make wasm` from inside any wasm-capable project directory (across all six platforms). The
 target builds the `.wasm`, writes everything into a `sim/` subfolder, then launches a local
-server and opens Chrome.
+server and opens Chrome. (`make list` from the repo root prints every project.)
 
 Projects you can try:
 
@@ -216,6 +218,32 @@ Projects you can try:
 | [platform/nts-1_mkii/dummy-revfx](platform/nts-1_mkii/dummy-revfx) | effect template | fx |
 | [platform/nts-3_kaoss/pluck](platform/nts-3_kaoss/pluck) | generic FX | xypad |
 | [platform/nts-3_kaoss/dummy-genericfx](platform/nts-3_kaoss/dummy-genericfx) | generic FX template | xypad |
+| [platform/microkorg2/waves](platform/microkorg2/waves) | oscillator (gen-2) | osc |
+| [platform/microkorg2/dummy-osc](platform/microkorg2/dummy-osc) | oscillator template | osc |
+| [platform/microkorg2/dummy-modfx](platform/microkorg2/dummy-modfx) | effect template | fx |
+| [platform/microkorg2/dummy-delfx](platform/microkorg2/dummy-delfx) | effect template | fx |
+| [platform/microkorg2/dummy-revfx](platform/microkorg2/dummy-revfx) | effect template | fx |
+| [platform/drumlogue/dummy-synth](platform/drumlogue/dummy-synth) | synth (stereo) | osc |
+| [platform/drumlogue/dummy-delfx](platform/drumlogue/dummy-delfx) | effect template (stereo) | fx |
+| [platform/drumlogue/dummy-revfx](platform/drumlogue/dummy-revfx) | effect template (stereo) | fx |
+| [platform/drumlogue/dummy-masterfx](platform/drumlogue/dummy-masterfx) | master FX (4-in/2-out) | fx |
+| [platform/nutekt-digital/waves](platform/nutekt-digital/waves) | oscillator (gen-1) | osc |
+| [platform/minilogue-xd/waves](platform/minilogue-xd/waves) | oscillator (gen-1) | osc |
+| [platform/prologue/waves](platform/prologue/waves) | oscillator (gen-1) | osc |
+
+### Supported platforms & caveats
+
+| Platform | SDK | Status | Caveats |
+|----------|-----|--------|---------|
+| NTS-1 mkII | gen-2 | full | — |
+| NTS-3 kaoss | gen-2 | full | X/Y pad shell |
+| microKORG2 | gen-2 | osc + fx templates | **single-voice** osc (`voiceLimit = 1`); the NEON-heavy "real" units (`vox`, `MorphEQ`, `MultitapDelay`, `Vibrato`, `breveR`) are not yet wired — they use direct NEON intrinsics plus KORG's `int_simd.h`/`float_simd.h` runtime-lane paths that need extra SIMDe triage |
+| drumlogue | gen-2 | synth + fx | stereo; NEON via SIMDe (`-msimd128`); sample-bank accessors are stubbed (no sample playback); `masterfx` is fed the stereo source duplicated to 4 input channels |
+| prologue / minilogue xd / NTS-1 mkI | gen-1 | osc | separate q31 harness; pitch via note table; same unified `make websim PROJECT=...` command |
+
+The infrastructure is shared: every project includes `websim/wasm.mk` (gen-2) or
+`websim/legacy.mk` (gen-1); per-platform firmware-ROM stand-ins and host bridges live under
+`websim/dsp/<platform>/`.
 
 ### Linux / macOS
 
