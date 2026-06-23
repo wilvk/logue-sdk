@@ -43,9 +43,13 @@ WEBSIM_EMCC_EXTRA ?=
 # hardware build: no _unit_base.c, no CMSIS, no linker script.
 WEBSIM_WASMSRC := $(WEBSIM_UNITSRC) $(WEBSIM_DSP)
 
-.PHONY: wasm
+.PHONY: wasm wasm-build
 
-wasm:
+# Build-only: compile the DSP to wasm and stage the page + assets in WASMDIR,
+# WITHOUT launching a server. `make wasm` adds the emrun launch on top; the root
+# Makefile's `websim-all` reuses this with a per-project WASMDIR to co-serve many
+# units from one tree (see WEBSIM.md).
+wasm-build:
 	@echo Building WebAssembly audio processor
 	@mkdir -p $(WASMDIR)
 	@cp -r $(SANDBOXDIR)/samples $(WASMDIR)/
@@ -65,5 +69,8 @@ wasm:
 		$(WEBSIM_WASMSRC) \
 		-o $(WASMDIR)/$(PROJECT).html
 	@echo Done
+
+# Build a single unit and launch its sandbox (the standalone flow).
+wasm: wasm-build
 	@echo Opening the sandbox
 	@$(EMCC_BIN_PATH)/emrun --browser chrome --serve_after_close $(WASMDIR)/$(PROJECT).html

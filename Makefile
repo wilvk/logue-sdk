@@ -18,8 +18,14 @@
 # Default project to launch (path relative to repo root, or a bare project name).
 PROJECT ?= platform/nts-1_mkii/waves
 
-EMSDK_DIR := tools/emsdk
-EMSDK     := $(EMSDK_DIR)/emsdk
+EMSDK_DIR     := tools/emsdk
+EMSDK         := $(EMSDK_DIR)/emsdk
+EMCC_BIN_PATH := $(EMSDK_DIR)/upstream/emscripten
+
+# Co-serve output root for `make websim-all`: every selected project is built
+# into $(WEBSIM_SIM_ROOT)/<platform>/<project>/ and served together so the
+# in-page device/project comboboxes can navigate between them.
+WEBSIM_SIM_ROOT := websim/sim
 
 # Auto-discover every project that can build a wasm sandbox: either it defines a
 # literal `wasm:` target (legacy/inline) or it includes a shared websim fragment
@@ -57,7 +63,13 @@ endef
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup check list websim run clean
+.PHONY: help setup check list websim websim-all run clean
+
+# Projects to bundle into the co-serve tree. Defaults to every wasm-capable
+# project; override with a space-separated list of full paths, e.g.
+#   make websim-all PROJECTS="platform/nts-1_mkii/waves platform/microkorg2/waves"
+PROJECTS ?=
+WEBSIM_ALL_PROJECTS := $(if $(PROJECTS),$(PROJECTS),$(WASM_PROJECTS))
 
 help:
 	@echo "logue-sdk websim launcher"
@@ -65,16 +77,21 @@ help:
 	@echo "Targets:"
 	@echo "  setup            One-time: fetch the emsdk submodule and install/activate Emscripten."
 	@echo "  list             List all wasm-capable projects."
-	@echo "  websim           Build a project to WebAssembly and open it in the browser."
+	@echo "  websim           Build a single project to WebAssembly and open it in the browser."
+	@echo "  websim-all       Build every (or PROJECTS=...) project into one tree and serve them"
+	@echo "                   together, with in-page Device/Project comboboxes to switch units."
 	@echo "  clean            Remove a project's build/ and sim/ output."
 	@echo "  help             Show this message."
 	@echo ""
 	@echo "Variables:"
-	@echo "  PROJECT          Project path or bare name (default: $(PROJECT))."
+	@echo "  PROJECT          Project path or bare name for 'websim' (default: $(PROJECT))."
+	@echo "  PROJECTS         Space-separated project paths to bundle for 'websim-all' (default: all)."
 	@echo ""
 	@echo "Examples:"
 	@echo "  make setup"
 	@echo "  make websim                                            # default (NTS-1 mkII waves)"
+	@echo "  make websim-all                                        # all units, switchable in-page"
+	@echo "  make websim-all PROJECTS=\"platform/nts-1_mkii/waves platform/microkorg2/waves\""
 	@echo "  make websim PROJECT=platform/nts-3_kaoss/pluck"
 	@echo "  make websim PROJECT=platform/microkorg2/waves          # microKORG2 (gen-2)"
 	@echo "  make websim PROJECT=platform/drumlogue/dummy-synth     # drumlogue (stereo synth)"
@@ -121,6 +138,25 @@ websim run: check
 	@$(resolve_project); \
 	echo "==> Launching websim for $$dir"; \
 	$(MAKE) -C "$$dir" wasm
+
+# Build every (or PROJECTS="...") unit into one tree and serve them together so
+# the in-page Device/Project comboboxes can switch between units. Building all
+# projects with -O2 takes a while; pass PROJECTS=... to bundle a subset.
+websim-all: check
+	@echo "==> Building $(words $(WEBSIM_ALL_PROJECTS)) project(s) into $(WEBSIM_SIM_ROOT)"
+	@rm -rf $(WEBSIM_SIM_ROOT)
+	@mkdir -p $(WEBSIM_SIM_ROOT)
+	@set -e; for p in $(WEBSIM_ALL_PROJECTS); do \
+	  plat=$$(basename $$(dirname $$p)); \
+	  proj=$$(basename $$p); \
+	  echo "==> $$plat/$$proj"; \
+	  $(MAKE) --no-print-directory -C "$$p" wasm-build \
+	    WASMDIR="$(abspath $(WEBSIM_SIM_ROOT))/$$plat/$$proj"; \
+	done
+	@python3 websim/gen_manifest.py $(WEBSIM_SIM_ROOT) .
+	@echo "==> Opening the websim launcher"
+	@$(EMCC_BIN_PATH)/emrun --browser chrome --serve_after_close \
+	  --serve_root $(WEBSIM_SIM_ROOT) $(WEBSIM_SIM_ROOT)/index.html
 
 clean:
 	@$(resolve_project); \
