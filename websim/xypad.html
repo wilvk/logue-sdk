@@ -551,14 +551,17 @@
       // XY Pad
       let xyPad = document.getElementById("XYPad");
 
-      // The pad stretches to fill its panel (CSS flex); keep the drawing buffer
-      // matched to the rendered size so touch coordinates map 1:1. Changing the
-      // buffer doesn't affect layout, so observing the element can't loop.
+      // Keep the drawing buffer matched to the rendered size so touch
+      // coordinates map 1:1. Use clientWidth/clientHeight (the *content* box)
+      // rather than getBoundingClientRect (the *border* box): with
+      // box-sizing:border-box, copying the border-box size into the bitmap adds
+      // the 2px border every pass and, if the pad is ever content-sized, ratchets
+      // it larger each ResizeObserver cycle. Only write when it actually changed.
       function sizeXYPad() {
-        let rect = xyPad.getBoundingClientRect();
-        if (rect.width && rect.height) {
-          xyPad.width = Math.round(rect.width);
-          xyPad.height = Math.round(rect.height);
+        let w = xyPad.clientWidth, h = xyPad.clientHeight;
+        if (w && h && (xyPad.width !== w || xyPad.height !== h)) {
+          xyPad.width = w;
+          xyPad.height = h;
         }
       }
       sizeXYPad();
