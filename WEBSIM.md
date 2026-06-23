@@ -279,6 +279,7 @@ Projects you can try:
 | [platform/drumlogue/dummy-revfx](platform/drumlogue/dummy-revfx) | effect template (stereo) | fx |
 | [platform/drumlogue/dummy-masterfx](platform/drumlogue/dummy-masterfx) | master FX (4-in/2-out) | fx |
 | [platform/nutekt-digital/waves](platform/nutekt-digital/waves) | oscillator (gen-1) | osc |
+| [platform/nutekt-digital/twosaw](platform/nutekt-digital/twosaw) | detuned dual-saw osc example (gen-1) | osc |
 | [platform/nutekt-digital/tremolo](platform/nutekt-digital/tremolo) | modfx example (gen-1) | fx |
 | [platform/minilogue-xd/waves](platform/minilogue-xd/waves) | oscillator (gen-1) | osc |
 | [platform/prologue/waves](platform/prologue/waves) | oscillator (gen-1) | osc |

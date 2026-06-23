@@ -1,7 +1,7 @@
 # websim Follow-up Plan — Remaining Work After the Platform Expansion
 
-Status: **complete** — §A, §B, §C.1, §C.2, §C.4, §D, §E done; §C.3 enabled (no in-repo units to
-wire). §D landed after fixing two real bugs in vox's never-before-exercised x4 path (see §D).
+Status: **complete** — all of §A–§E done (incl. §C.3, with a worked `twosaw` gen-1 osc example).
+§D landed after fixing two real bugs in vox's never-before-exercised x4 path (see §D).
 Last updated: 2026-06-23
 Predecessor: [WEBSIM_EXPANSION_PLAN.md](WEBSIM_EXPANSION_PLAN.md) (implemented — all six
 platforms build templates/reference units via `make websim PROJECT=...`).
@@ -137,10 +137,12 @@ Builds are verified; **audio output is not** — `emrun` opens Chrome, which CI/
       `wasm.mk` generates it when a project sets `WEBSIM_LEGACY_MANIFEST` and puts it on the include
       path. The nutekt-digital / minilogue-xd / prologue `waves` units now include the generated
       header instead of a hand-written table (all still render note 69 at ~440 Hz).
-- [~] C.3 **More gen-1 oscillators** — *enabled* by C.2 but not exercised: there are no additional
-      gen-1 osc units in-repo. With C.2, wiring a community unit is just dropping its sources + a
-      3-line `wasm.cc` (`#include "userosc.h"` / `"websim_legacy_params.h"` / `"legacy_osc_bridge.h"`)
-      and a Makefile stanza with `WEBSIM_LEGACY_MANIFEST`. No C edits needed.
+- [x] C.3 **More gen-1 oscillators** — added a worked non-`waves` example,
+      [`platform/nutekt-digital/twosaw`](../../platform/nutekt-digital/twosaw) (detuned dual-saw,
+      self-contained — no firmware ROM helpers), driven entirely by the manifest-derived param
+      table (C.2). Builds + renders note 69 at ~440 Hz. Confirms wiring a community gen-1 osc is
+      just sources + a 3-line `wasm.cc` (`userosc.h` / `websim_legacy_params.h` /
+      `legacy_osc_bridge.h`) + a Makefile stanza with `WEBSIM_LEGACY_MANIFEST` — no C edits.
 - [x] C.4 **drumlogue sample playback** added: `websim/dsp/drumlogue/dl_sample_bank.h` provides a
       synthetic host sample bank (sine/noise/chord one-shots as `sample_wrapper_t`), wired into the
       synth bridge's `get_num_sample_banks`/`get_num_samples_for_bank`/`get_sample`. The
