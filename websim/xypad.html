@@ -6,6 +6,7 @@
   <title>logue-sdk XY pad</title>
   <script src="scripts/qwerty-hancock.js"></script>
   <script src="scripts/websim-selector.js"></script>
+  <script src="scripts/drum-loop.js"></script>
   <link rel="icon" type="image/x-icon" href="images/favicon.ico">
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;700&display=swap" rel="stylesheet">
   <style>
@@ -40,8 +41,8 @@
     .grid {
       display: grid; gap: 14px; min-height: 0; align-content: start;
       grid-template-columns: minmax(540px, 1fr) minmax(430px, .78fr);
-      grid-template-rows: auto auto auto;
-      grid-template-areas: "osc xy" "scope xy" "params sample";
+      grid-template-rows: auto auto auto auto;
+      grid-template-areas: "osc xy" "scope xy" "params sample" "drum drum";
     }
 
     .panel {
@@ -436,6 +437,10 @@
         }
         window.frequencyStack.push(frequency);
         oscillator.frequency.value = frequency;
+        // Remember the last note played so the drum loop can retrigger it.
+        window.lastPlayedNote = note;
+        window.lastPlayedFrequency = frequency;
+        if (window.updateDrumNoteLabel) window.updateDrumNoteLabel(note);
         envelope.gain.cancelAndHoldAtTime(context.currentTime);
         envelope.gain.linearRampToValueAtTime(1.0, context.currentTime + AHREnvelopeTime);
         // console.log("active notes: ", window.frequencyStack.length);
@@ -625,6 +630,15 @@
         let mapping = mappings.get(i);
         createSlider(wasmProcessor, param, mapping, i);
       }
+
+      // Drum loop step sequencer (shared panel — scripts/drum-loop.js). Like the
+      // fx shell, a hit sets the running oscillator's frequency and the shared
+      // envelope gates the blip into the effect.
+      window.initDrumLoop({
+        mount: document.querySelector(".grid"),
+        context, envelope,
+        setPitch: (freq) => { oscillator.frequency.value = freq; },
+      });
     };
   </script>
 

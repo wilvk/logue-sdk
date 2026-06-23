@@ -11,6 +11,27 @@ targets, what you hear in the browser is what ships to the synth.
 > (gen-1, via `nutekt-digital`). See the per-platform caveats under
 > [Supported platforms & caveats](#supported-platforms--caveats).
 
+## Screenshots
+
+Every unit runs in one of three browser shells, each with a Device/Project switcher, a
+default-on Playback toggle, drag-resizable panels, and a shared 8-bar **Drum Loop** step
+sequencer.
+
+**Oscillator shell** (`osc.html`) — on-screen keyboard, live parameter sliders, scope, drum loop
+(here: NTS-1 mkII `waves`):
+
+![websim oscillator shell](docs/images/websim/websim-osc.png)
+
+**Effect shell** (`fx.html`) — built-in sample/loop sources played through the effect, parameter
+sliders, scope showing the processed signal (here: microKORG2 `breveR` reverb):
+
+![websim effect shell](docs/images/websim/websim-fx.png)
+
+**X/Y pad shell** (`xypad.html`) — kaoss-pad-style X/Y control for NTS-3 generic FX
+(here: NTS-3 `pluck`):
+
+![websim X/Y pad shell](docs/images/websim/websim-xypad.png)
+
 ---
 
 ## Quick start — the root Makefile
@@ -170,6 +191,27 @@ The embedded JS builds sliders dynamically from `Module.getValidParameters()`, r
 keyboard to `Module.noteOn` / `noteOff` / `setOscPitch`, and is bootstrapped by
 `setupWebAudioAndUI(context, wasmProcessor)`, which the C++ calls via `EM_ASM` once the
 worklet node exists.
+
+#### Shared shell chrome
+
+All three shells wrap their unit-specific UI in the same topbar and panel furniture:
+
+- **Device / Project comboboxes** to switch units without leaving the page (see
+  [Switching devices & projects](#switching-devices--projects-in-the-browser)), plus a **Master**
+  volume slider and — on `fx`/`xypad` — a **BPM** slider.
+- A **Playback** toggle that is **on by default** and remembered in `sessionStorage`, so it stays
+  enabled across the full-page reload that switching units performs. (The browser's autoplay
+  policy still gates `AudioContext.resume()` on a user gesture, so the button shows "on"
+  optimistically and audio actually starts on your first key press / input-source play.)
+- **Drag-resizable panels** — grab the bottom-right corner of any panel to resize it, so a tall
+  panel (e.g. the drum sequencer) can't squash the others; the page scrolls instead of clipping.
+- A shared **Drum Loop** step sequencer ([websim/scripts/drum-loop.js](websim/scripts/drum-loop.js)):
+  an 8-bar × 4-beat grid that retriggers the last note you played on the keyboard as a short
+  percussive blip, with a tempo slider (40–240 BPM), a clear button, and a moving playhead. It
+  schedules off the Web Audio clock with a `setInterval` lookahead (the standard "two clocks"
+  pattern) so timing stays steady regardless of main-thread jitter. The `osc` shell drives the
+  wasm voice directly (`setOscPitch` / `noteOn` / `noteOff`); the `fx` and `xypad` shells gate a
+  continuously running `OscillatorNode` through the effect.
 
 ### Data flow
 

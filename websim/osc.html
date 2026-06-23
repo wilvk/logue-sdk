@@ -7,6 +7,7 @@
   <title>logue-sdk osc</title>
   <script src="scripts/qwerty-hancock.js"></script>
   <script src="scripts/websim-selector.js"></script>
+  <script src="scripts/drum-loop.js"></script>
   <link rel="icon" type="image/x-icon" href="images/favicon.ico">
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;700&display=swap" rel="stylesheet">
   <style>
@@ -17,13 +18,13 @@
     * { box-sizing: border-box; }
     html, body { height: 100%; }
     body {
-      margin: 0; padding: 16px; overflow: hidden;
+      margin: 0; padding: 16px; overflow: auto;
       font-family: 'Space Grotesk', sans-serif;
       -webkit-font-smoothing: subpixel-antialiased;
       background: radial-gradient(1200px 700px at 15% -10%, #171a21, var(--bg));
       color: var(--text);
     }
-    .app { height: calc(100vh - 32px); display: grid; grid-template-rows: auto 1fr; gap: 14px; }
+    .app { min-height: calc(100vh - 32px); display: grid; grid-template-rows: auto 1fr; gap: 14px; }
 
     .topbar {
       display: flex; align-items: center; flex-wrap: wrap; gap: 16px;
@@ -39,23 +40,26 @@
     .readout { color: var(--accent); font-variant-numeric: tabular-nums; min-width: 38px; font-size: 13px; }
 
     .grid {
-      display: grid; gap: 14px; min-height: 0;
+      display: grid; gap: 14px; min-height: 0; align-content: start;
       grid-template-columns: minmax(540px, 1fr) minmax(540px, 1fr);
-      grid-template-rows: auto 1fr;
-      grid-template-areas: "osc scope" "params scope";
+      grid-template-rows: auto auto auto;
+      grid-template-areas: "osc scope" "params scope" "drum drum";
     }
 
     .panel {
       background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
-      padding: 14px 16px; display: flex; flex-direction: column; min-height: 0;
+      padding: 14px 16px; display: flex; flex-direction: column;
       box-shadow: 0 8px 24px rgba(0, 0, 0, .28);
+      /* Drag the bottom-right corner to resize any panel so a tall one (e.g. the
+         drum grid) doesn't squash the others. overflow:hidden enables the handle. */
+      resize: both; overflow: hidden; min-height: 120px; min-width: 220px;
     }
     .panel > h2 {
       margin: 0 0 12px; font-size: 13px; font-weight: 700; letter-spacing: 1.5px;
       text-transform: uppercase; color: var(--accent); display: flex; align-items: center; gap: 10px;
     }
     .panel > h2::before { content: ""; width: 5px; height: 14px; border-radius: 3px; background: var(--accent); }
-    .panel .body { min-height: 0; overflow: auto; }
+    .panel .body { flex: 1; min-height: 0; overflow: auto; }
     .tip { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
     .row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
 
@@ -129,6 +133,7 @@
           <div id="Parameters"></div>
         </div>
       </section>
+      <!-- The "drum" grid area is filled by scripts/drum-loop.js (initDrumLoop). -->
     </main>
   </div>
 
@@ -293,6 +298,10 @@
         }
         window.frequencyStack.push(frequency);
         osc_frequency = frequency;
+        // Remember the last note played so the drum loop can retrigger it.
+        window.lastPlayedNote = note;
+        window.lastPlayedFrequency = frequency;
+        if (window.updateDrumNoteLabel) window.updateDrumNoteLabel(note);
         Module.setOscPitch(osc_frequency);
         Module.noteOn(note, 100); // TODO: add a slider for velocity
         envelope.gain.cancelAndHoldAtTime(context.currentTime);
@@ -331,6 +340,16 @@
           currentOctave = Math.min(7, currentOctave + 1);
           keyboard.setKeyOctave(currentOctave);
         }
+      });
+
+      // Drum loop step sequencer (shared panel — scripts/drum-loop.js). The osc
+      // shell drives the wasm voice directly, so hand it pitch/gate hooks.
+      window.initDrumLoop({
+        mount: document.querySelector(".grid"),
+        context, envelope,
+        setPitch: (freq) => Module.setOscPitch(freq),
+        noteOn: (note) => Module.noteOn(note, 100),
+        noteOff: (note) => Module.noteOff(note),
       });
 
       // scope

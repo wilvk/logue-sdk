@@ -8,9 +8,21 @@ This repository contains all the files and tools needed to build custom oscillat
 
 ## What's New
 
-A new web-based simulator for NTS-1 mkii and NTS-3 in [websim](websim/). 
-Develop, test and debug DSP code inside a web browser to greatly speed up development cycle.
-Take a look at [websim/README.md](websim/README.md) to learn about how to use it.
+A web-based simulator, **[websim](WEBSIM.md)**, builds a unit to WebAssembly and runs the
+*same* DSP code in your browser — develop, test and debug without flashing hardware on every
+change. It now covers **all six** logue-SDK platforms (NTS-1 mkII, NTS-3 kaoss, microKORG2,
+drumlogue, and the gen-1 prologue / minilogue xd / NTS-1 mkI), with:
+
+- one-command **`make websim`** that compiles units **on demand** and serves them with in-page
+  **Device / Project** switchers (no rebuild to try another unit);
+- three UI shells — a keyboard oscillator, a sample-through effect, and a kaoss X/Y pad — with
+  live parameter sliders, a scope, a shared **drum-loop step sequencer**, and default-on playback;
+- a **headless render harness** (`make render`) + checker for CI/agent audio smoke-tests.
+
+![websim oscillator shell](docs/images/websim/websim-osc.png)
+
+See **[WEBSIM.md](WEBSIM.md)** for the full guide (KORG's original short notes are in
+[websim/README.md](websim/README.md)).
 
 ## Existing logue SDK Units
 
