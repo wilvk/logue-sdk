@@ -21,9 +21,11 @@ have to `cd` into emsdk or individual projects. Run all of these from the **repo
 ```bash
 make setup       # one-time: fetch the emsdk submodule + install/activate Emscripten
 make list        # show every wasm-capable project
-make websim      # build the default project (waves) to wasm and open it in the browser
-make websim-all  # build EVERY project into one tree and serve them together, with
-                 # in-page Device/Project comboboxes to switch units without rebuilding
+make websim      # build the default project (waves), open it in the browser, and offer
+                 # every other unit in the Device/Project comboboxes — each compiled on
+                 # demand (with a loading overlay) the first time you pick it
+make websim-all  # eagerly build EVERY project into one tree and serve them together, so
+                 # the same comboboxes switch units with no per-pick compile wait
 ```
 
 Pick a different unit with `PROJECT` — either a full path or a bare project name:
@@ -39,8 +41,8 @@ make help                                          # list all targets and variab
 |--------|--------------|
 | `make setup` | `git submodule update --init tools/emsdk`, then `emsdk install latest && emsdk activate latest`. |
 | `make list` | Auto-discovers projects that define a `wasm:` target (stays correct as projects are added). |
-| `make websim` | Runs the project's `make wasm` (build + launch browser). Defaults to `platform/nts-1_mkii/waves`. |
-| `make websim-all` | Builds every (or `PROJECTS="..."`) unit into one co-served tree and opens it with **Device** + **Project** comboboxes to switch units in the browser. See [Switching devices & projects](#switching-devices--projects-in-the-browser). |
+| `make websim` | Builds one project (default `platform/nts-1_mkii/waves`) into the co-serve tree and launches the **compile-on-demand dev server** ([websim/scripts/websim_server.py](websim/scripts/websim_server.py)): the **Device** + **Project** comboboxes list *every* unit, and picking one that isn't built yet compiles it (loading overlay) before loading. See [Switching devices & projects](#switching-devices--projects-in-the-browser). |
+| `make websim-all` | Eagerly builds every (or `PROJECTS="..."`) unit into one co-served tree (served by `emrun`) so the same comboboxes switch units with no per-pick compile. |
 | `make clean` | Runs the project's `make clean` (removes `build/` and `sim/`). |
 | `make help` | Shows usage. This is the default target. |
 
@@ -62,37 +64,45 @@ runs under the hood).
 
 ## Switching devices & projects in the browser
 
-`make websim` builds and serves **one** unit at a time. To browse units without re-running
-make, use **`make websim-all`**: it builds every wasm-capable project into a single shared
-tree and serves it cross-origin-isolated from one origin —
+Both `make websim` and `make websim-all` give every shell page (`osc` / `fx` / `xypad`) a
+**Device** and a **Project** combobox in its topbar, populated from a generated `projects.json`
+by [websim/scripts/websim-selector.js](websim/scripts/websim-selector.js). They differ only in
+*when* units are compiled:
+
+- **`make websim`** builds just the project you asked for, then serves the tree through the
+  **compile-on-demand dev server** ([websim/scripts/websim_server.py](websim/scripts/websim_server.py)).
+  The combobox lists **every** wasm-capable unit, with the current one preselected. Picking one
+  that's already built loads it immediately; picking one that isn't yet built calls
+  `GET /api/compile?project=<platform>/<project>`, which runs `make wasm-build` for that unit
+  into the same tree and returns its page — a **loading overlay** covers the compile + reload
+  (and shows the build log if it fails). The tree doubles as a build cache, so a unit you've
+  already visited reloads instantly.
+- **`make websim-all`** eagerly builds every (or `PROJECTS="..."`) unit up front and serves the
+  tree with `emrun`. Every listed unit is already built, so switching never waits on a compile.
+  Build a subset to keep the up-front build fast (all units with `-O2` takes a while):
+
+  ```bash
+  make websim-all PROJECTS="platform/nts-1_mkii/waves platform/microkorg2/waves"
+  ```
+
+The co-serve tree looks like:
 
 ```
 websim/sim/
-  index.html                 # redirects to a default unit
-  projects.json              # generated manifest (devices -> projects -> page/shell)
+  index.html                 # redirects to the default / current unit
+  projects.json              # generated manifest (devices -> projects: id/name/shell/built/page)
   <platform>/<project>/<project>.html  (+ .js / .wasm / copied assets)
 ```
 
-Each shell page (`osc` / `fx` / `xypad`) now has a **Device** and a **Project** combobox in
-its topbar. They are populated from `projects.json` by
-[websim/scripts/websim-selector.js](websim/scripts/websim-selector.js):
+Switching is always a **full page load**: each unit is a separate WebAssembly build wrapped in
+its own UI shell, so the correct shell and that unit's parameter sliders are rebuilt from
+scratch. Picking a **device** repopulates the project list and loads that device's first
+project. When a single unit is served standalone by an in-project `make wasm` (no manifest),
+`projects.json` 404s and the selector hides itself — that page looks exactly as before.
 
-- **Picking a project** navigates to that project's prebuilt page. Because each unit is a
-  separate WebAssembly build wrapped in its own UI shell, switching is a **full page load** —
-  the correct shell and that unit's parameter sliders are rebuilt from scratch.
-- **Picking a device** repopulates the project list and loads that device's first project.
-
-Build a subset to keep it fast (building all units with `-O2` takes a while):
-
-```bash
-make websim-all PROJECTS="platform/nts-1_mkii/waves platform/microkorg2/waves"
-```
-
-The combobox only lists what was actually built into `websim/sim/`. When a unit is served
-standalone via `make websim`, there is no manifest, so the selector hides itself and the page
-looks exactly as before. The manifest + landing page are produced by
-[websim/gen_manifest.py](websim/gen_manifest.py); the underlying build-only step is the
-`wasm-build` target in [websim/wasm.mk](websim/wasm.mk) (`make wasm` = `wasm-build` + launch).
+The manifest + landing page are produced by [websim/gen_manifest.py](websim/gen_manifest.py)
+(pass `--projects` to also list units that aren't built yet); the underlying build-only step is
+the `wasm-build` target in [websim/wasm.mk](websim/wasm.mk).
 
 ---
 
@@ -380,11 +390,11 @@ For changes that need a real ear/eye (every slider, the keyboard, the UI), open 
 `make websim PROJECT=...` and confirm:
 
 - [ ] the page loads **cross-origin-isolated** (no "SharedArrayBuffer is not defined" in the console);
-- [ ] audio starts on the first user gesture (key press / input-source play);
+- [ ] playback is **on by default** (the Playback button shows selected) and audio starts on the first user gesture (key press / input-source play);
 - [ ] for oscillators: the on-screen keyboard changes pitch; for effects: the input loop plays through;
 - [ ] **every** slider audibly changes the sound (sweep each end);
 - [ ] no errors or `NaN`/denormal warnings in the browser console;
-- [ ] switching units via the Device/Project comboboxes (`make websim-all`) reloads cleanly.
+- [ ] switching units via the Device/Project comboboxes reloads cleanly — including an **unbuilt** unit under `make websim` (loading overlay → compiles → loads).
 
 ---
 

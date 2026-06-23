@@ -144,10 +144,30 @@ list:
 	@printf '  %s\n' $(WASM_PROJECTS)
 
 # Build to WebAssembly and launch the browser sandbox.
+#
+# Unlike a bare `make wasm` (one unit, served by emrun), this stages the unit
+# into the shared co-serve tree and launches the compile-on-demand dev server
+# (websim/scripts/websim_server.py). That server serves the tree cross-origin
+# isolated (like emrun) but also exposes the Device/Project comboboxes for every
+# wasm-capable project: the current one starts built, and picking another one
+# compiles it on demand (with a loading overlay) before loading. The tree doubles
+# as a build cache, so a unit you've already visited reloads instantly.
+WEBSIM_SIM_ABS := $(abspath $(WEBSIM_SIM_ROOT))
+
 websim run: check
 	@$(resolve_project); \
-	echo "==> Launching websim for $$dir"; \
-	$(MAKE) -C "$$dir" wasm
+	id=$${dir#platform/}; \
+	echo "==> Building $$dir into $(WEBSIM_SIM_ROOT)/$$id"; \
+	mkdir -p "$(WEBSIM_SIM_ABS)/$$id"; \
+	$(MAKE) --no-print-directory -C "$$dir" wasm-build WASMDIR="$(WEBSIM_SIM_ABS)/$$id"; \
+	page=$$(ls "$(WEBSIM_SIM_ABS)/$$id"/*.html 2>/dev/null | grep -v '/index.html' | head -1); \
+	page=$${page##*/}; \
+	echo "==> Writing launcher manifest (every project, current one preselected)"; \
+	python3 websim/gen_manifest.py "$(WEBSIM_SIM_ROOT)" . \
+	  --can-compile --default "$$id" --projects "$(WASM_PROJECTS)"; \
+	echo "==> Launching websim (compile-on-demand) for $$id"; \
+	python3 websim/scripts/websim_server.py --root "$(WEBSIM_SIM_ROOT)" --repo-root . \
+	  --make "$(MAKE)" --projects "$(WASM_PROJECTS)" --open "$$id/$$page"
 
 # Build every (or PROJECTS="...") unit into one tree and serve them together so
 # the in-page Device/Project comboboxes can switch between units. Building all

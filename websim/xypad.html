@@ -64,6 +64,8 @@
       transition: border-color .15s, color .15s;
     }
     button:hover { border-color: var(--accent); color: var(--accent); }
+    button.active { border-color: var(--accent); color: var(--bg); background: var(--accent); font-weight: 700; }
+    button.active:hover { color: var(--bg); }
     select {
       font-family: inherit; font-size: 13px; color: var(--text); background: var(--panel-2);
       border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;
@@ -319,15 +321,28 @@
         source.connect(mixGain);
       }
 
-      // resume/stop button
+      // Playback toggle — enabled by default and shown selected while running.
+      // AudioContext.resume() is gated behind a user gesture, so we show the
+      // "on" state optimistically, try to resume now, and also resume on the
+      // first interaction; the button then mirrors context.state.
       let togglePlaybackButton = document.getElementById("TogglePlaybackButton");
+      function setPlaybackButton(on) {
+        togglePlaybackButton.classList.toggle("active", on);
+        togglePlaybackButton.textContent = on ? "Playback On" : "Playback Off";
+        togglePlaybackButton.setAttribute("aria-pressed", on ? "true" : "false");
+      }
+      context.addEventListener("statechange", () => setPlaybackButton(context.state === "running"));
       togglePlaybackButton.onclick = () => {
-        if (context.state !== "running") {
-          context.resume();
-        } else {
-          context.suspend();
-        }
+        if (context.state !== "running") context.resume();
+        else context.suspend();
       };
+      function resumePlaybackOnGesture() {
+        if (context.state !== "running") context.resume().catch(() => {});
+      }
+      window.addEventListener("pointerdown", resumePlaybackOnGesture, { once: true });
+      window.addEventListener("keydown", resumePlaybackOnGesture, { once: true });
+      setPlaybackButton(true);          // default on (selected)
+      context.resume().catch(() => {}); // start now if the browser allows it
 
       // main volume
       let volumeSlider = document.getElementById("VolumeSlider");
